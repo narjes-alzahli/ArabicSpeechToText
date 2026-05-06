@@ -11,23 +11,67 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
+import mlx_whisper
+
 
 MODEL_MAP = {
-    "large-v3":    "mlx-community/whisper-large-v3-mlx",
-    "medium":      "mlx-community/whisper-medium-mlx",
-    "small":       "mlx-community/whisper-small-mlx",
-    "turbo":       "mlx-community/whisper-large-v3-turbo",
+    "large-v3-4bit": "mlx-community/whisper-large-v3-mlx-4bit",   # recommended: fast + accurate
+    "turbo-4bit":    "mlx-community/whisper-large-v3-turbo-q4",    # recommended for live
+    "large-v3":      "mlx-community/whisper-large-v3-mlx",         # max accuracy, slow
+    "turbo":         "mlx-community/whisper-large-v3-turbo",
+    "medium":        "mlx-community/whisper-medium-mlx",
+    "small":         "mlx-community/whisper-small-mlx",
 }
 
 DEFAULT_MODEL = "large-v3"
 
+# Shared Whisper kwargs — used by both CLI and UI
+WHISPER_FULL_KWARGS = dict(
+    language="ar",
+    word_timestamps=True,
+    verbose=False,
+    no_speech_threshold=0.6,
+    logprob_threshold=-3.0,
+    compression_ratio_threshold=3.0,
+    condition_on_previous_text=True,
+    temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    initial_prompt="هذا تسجيل لاجتماع باللغة العربية.",
+)
+
+WHISPER_LIVE_KWARGS = dict(
+    language="ar",
+    word_timestamps=False,
+    verbose=False,
+    no_speech_threshold=0.9,
+    logprob_threshold=-2.0,
+    condition_on_previous_text=True,
+    temperature=(0.0, 0.4, 0.8),
+    initial_prompt="هذا كلام باللغة العربية.",
+)
+
+
+def fmt_ts(seconds: float) -> str:
+    """HH:MM:SS — used for display and live timestamps."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def fmt_ts_ms(seconds: float) -> str:
+    """HH:MM:SS.mmm — millisecond precision for saved files."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}"
+
 
 def format_timestamp(seconds: float) -> str:
+    """HH:MM:SS,mmm — used for SRT/TXT file output."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
@@ -72,8 +116,6 @@ def to_json(segments, audio_path: str, model: str) -> str:
 
 
 def transcribe(audio_path: Path, model_key: str, fmt: str) -> str:
-    import mlx_whisper
-
     repo = MODEL_MAP[model_key]
 
     print(f"Model  : {model_key} ({repo})")
@@ -87,15 +129,7 @@ def transcribe(audio_path: Path, model_key: str, fmt: str) -> str:
     result = mlx_whisper.transcribe(
         str(audio_path),
         path_or_hf_repo=repo,
-        language="ar",
-        word_timestamps=False,
-        verbose=False,
-        no_speech_threshold=0.95,
-        logprob_threshold=-3.0,
-        compression_ratio_threshold=3.0,
-        condition_on_previous_text=True,
-        temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-        initial_prompt="هذا تسجيل لاجتماع باللغة العربية.",
+        **WHISPER_FULL_KWARGS,
     )
 
     elapsed = time.time() - t0

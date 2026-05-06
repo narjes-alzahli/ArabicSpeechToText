@@ -5,9 +5,12 @@ mlx-whisper==0.4.3
 numba==0.65.1
 numpy==2.4.4
 scipy==1.17.1
+soundfile>=0.12.1
 tiktoken==0.12.0
-torch==2.11.0
 tqdm==4.67.3
 gradio==6.13.0
 gradio_client==2.5.0
 hf-gradio==0.4.1
+# speaker diarization (optional — only needed if "تمييز المتحدثين" is enabled)
+pyannote.audio>=3.1.0
+torch>=2.1.0
