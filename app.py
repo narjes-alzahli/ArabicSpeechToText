@@ -5,8 +5,10 @@ Run: python app.py
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -18,22 +20,91 @@ if _env.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 
-import mlx_whisper
+# Gradio reads this at import time — use a project-local dir to reduce Windows temp/permission issues.
+_app_gradio_tmp = Path(__file__).parent / ".gradio_temp"
+_app_gradio_tmp.mkdir(exist_ok=True)
+os.environ.setdefault("GRADIO_TEMP_DIR", str(_app_gradio_tmp.resolve()))
+
 import numpy as np
 import soundfile as sf
 import gradio as gr
 
-from transcribe import MODEL_MAP, fmt_ts, fmt_ts_ms, WHISPER_FULL_KWARGS, WHISPER_LIVE_KWARGS
+from transcribe import (
+    MODEL_MAP,
+    describe_backend_failures,
+    fmt_ts,
+    fmt_ts_ms,
+    get_backend,
+    reset_whisper_caches,
+    transcribe_any,
+)
 from diarize import run_diarization, assign_speakers
+
+_ffmpeg_exe_cache: str | None = None
+
+
+def _ffmpeg_executable() -> str:
+    global _ffmpeg_exe_cache
+    if _ffmpeg_exe_cache:
+        return _ffmpeg_exe_cache
+    for key in ("FFMPEG_BIN", "FFMPEG_PATH"):
+        raw = os.environ.get(key, "").strip().strip('"')
+        if raw:
+            p = Path(raw)
+            if p.is_file():
+                _ffmpeg_exe_cache = str(p.resolve())
+                return _ffmpeg_exe_cache
+    found = shutil.which("ffmpeg")
+    if found:
+        _ffmpeg_exe_cache = found
+        return _ffmpeg_exe_cache
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    for guess in (
+        Path(r"C:\ffmpeg\bin\ffmpeg.exe"),
+        Path(program_files) / "ffmpeg" / "bin" / "ffmpeg.exe",
+    ):
+        if guess.is_file():
+            _ffmpeg_exe_cache = str(guess.resolve())
+            return _ffmpeg_exe_cache
+    raise RuntimeError(
+        "ffmpeg was not found. Install ffmpeg and add it to your PATH, or set FFMPEG_BIN in .env "
+        "to the full path of ffmpeg.exe (for example C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe)."
+    )
+
+
+def _copy_upload_for_processing(upload_path: str) -> str:
+    """Copy Gradio’s upload to a short path so ffmpeg/subprocess can open it reliably on Windows."""
+    src = Path(upload_path)
+    if not src.is_file():
+        raise gr.Error("Uploaded file is missing or not readable.")
+    suffix = src.suffix.lower() or ".bin"
+    fd, dest = tempfile.mkstemp(prefix="upload_", suffix=suffix)
+    os.close(fd)
+    try:
+        shutil.copyfile(str(src), dest)
+    except (PermissionError, OSError) as e:
+        Path(dest).unlink(missing_ok=True)
+        raise gr.Error(
+            "Could not read the uploaded file. Try a simpler file name (letters and numbers only), "
+            "or copy the file to your Desktop and upload again."
+        ) from e
+    return dest
 
 
 # ── Theme & CSS ───────────────────────────────────────────────────────────────
 
-THEME = gr.themes.Base(
-    primary_hue="stone",
-    neutral_hue="stone",
-    font=gr.themes.GoogleFont("Inter"),
-    font_mono=gr.themes.GoogleFont("IBM Plex Mono"),
+IS_WINDOWS = os.name == "nt"
+
+THEME = (
+    gr.themes.Base(primary_hue="stone", neutral_hue="stone")
+    if IS_WINDOWS
+    else gr.themes.Base(
+        primary_hue="stone",
+        neutral_hue="stone",
+        # GoogleFont can cause long stalls in offline/server environments.
+        font=gr.themes.GoogleFont("Inter"),
+        font_mono=gr.themes.GoogleFont("IBM Plex Mono"),
+    )
 ).set(
     body_background_fill="#faf8f4",
     body_text_color="#2c2825",
@@ -63,12 +134,13 @@ THEME = gr.themes.Base(
     shadow_inset="none",
 )
 
-CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+_FONT_IMPORT = "" if IS_WINDOWS else "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');"
+
+CSS = _FONT_IMPORT + """
 
 /* ── base ── */
 html, body, .gradio-container { background: #faf8f4 !important; }
-.gradio-container { max-width: 1600px !important; margin: 0 auto !important; padding: 0 !important; }
+.gradio-container { max-width: 1600px !important; width: 100% !important; margin: 0 auto !important; padding: 0 !important; }
 .main { padding: 0 !important; }
 
 /* ── topbar ── */
@@ -140,6 +212,21 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 }
 #live-transcript textarea::placeholder { color: #d4cec8 !important; }
 
+/* ── upload transcript heading (Markdown — avoids orphan <label for>) ── */
+.transcript-block-heading,
+.transcript-block-heading p {
+    margin: 0 0 8px 0 !important;
+    color: #9e9188 !important;
+    font-size: 0.85rem !important;
+    font-weight: 600 !important;
+}
+.transcript-block-heading h3 {
+    margin: 0 !important;
+    font-size: inherit !important;
+    font-weight: inherit !important;
+    color: inherit !important;
+}
+
 /* ── clickable transcript (upload tab) ── */
 #transcript-box { height: 100% !important; }
 #transcript-box > div {
@@ -207,7 +294,7 @@ button {
 }
 #transcribe-btn button { width: 100% !important; height: 40px !important; }
 #clear-btn button, #save-live-btn button { width: 100% !important; height: 36px !important; }
-#download-btn button, #live-download-btn button {
+.stt-download-btn button {
     width: 100% !important;
     height: 36px !important;
     background: #ffffff !important;
@@ -235,6 +322,16 @@ textarea::-webkit-scrollbar-thumb { background: #e8e2d6; border-radius: 2px; }
 
 /* ── prevent column stacking before upload ── */
 .gradio-row { flex-wrap: nowrap !important; }
+
+/* ── backend missing (PyTorch / VC++ runtime) ── */
+.backend-setup-warning {
+    border: 1px solid #c4a574 !important;
+    background: #fff8ec !important;
+    border-radius: 8px !important;
+    padding: 16px 20px !important;
+    margin: 0 0 16px 0 !important;
+}
+.backend-setup-warning p { margin: 0.5em 0 !important; }
 """
 
 
@@ -243,10 +340,15 @@ _loaded_model_repo: str | None = None
 
 def evict_model_if_changed(new_model_key: str):
     global _loaded_model_repo
-    import mlx.core as mx
     new_repo = MODEL_MAP[new_model_key]
     if _loaded_model_repo is not None and _loaded_model_repo != new_repo:
-        mx.clear_cache()
+        try:
+            import mlx.core as mx  # type: ignore
+
+            mx.clear_cache()
+        except Exception:
+            pass
+        reset_whisper_caches()
     _loaded_model_repo = new_repo
 
 
@@ -319,6 +421,22 @@ def _save_transcript(segments: list, source_path: str) -> None:
     out.write_text(segments_to_file(segments), encoding="utf-8")
 
 
+def _save_word_diarization(segments: list, source_path: str) -> None:
+    stem = Path(source_path).stem
+    out = Path(__file__).parent / f"{stem}_words.txt"
+    lines = []
+    for seg in segments:
+        speaker = seg.get("speaker", "")
+        for w in seg.get("words") or []:
+            word = w.get("word", "").strip()
+            if not word:
+                continue
+            start = fmt_ts_ms(w.get("start", seg["start"]))
+            end   = fmt_ts_ms(w.get("end",   seg["end"]))
+            lines.append(f"{speaker}  [{start} → {end}]  {word}")
+    out.write_text("\n".join(lines), encoding="utf-8")
+
+
 # ── Audio preprocessing ───────────────────────────────────────────────────────
 
 def extract_audio_for_diarization(input_path: str, start: float = 0.0, end: float = 0.0) -> str:
@@ -326,7 +444,8 @@ def extract_audio_for_diarization(input_path: str, start: float = 0.0, end: floa
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
 
-    cmd = ["ffmpeg", "-y"]
+    ff = _ffmpeg_executable()
+    cmd = [ff, "-y"]
     if start > 0:
         cmd += ["-ss", str(start)]
     cmd += ["-i", input_path]
@@ -343,7 +462,8 @@ def extract_audio_for_diarization(input_path: str, start: float = 0.0, end: floa
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         Path(tmp.name).unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg failed:\n{result.stderr.decode()}")
+        err = (result.stderr or b"").decode(errors="replace")
+        raise RuntimeError(f"ffmpeg failed:\n{err}")
 
     return tmp.name
 
@@ -352,7 +472,8 @@ def preprocess_audio(input_path: str, start: float = 0.0, end: float = 0.0) -> s
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
 
-    cmd = ["ffmpeg", "-y"]
+    ff = _ffmpeg_executable()
+    cmd = [ff, "-y"]
     if start > 0:
         cmd += ["-ss", str(start)]
     cmd += ["-i", input_path]
@@ -375,56 +496,106 @@ def preprocess_audio(input_path: str, start: float = 0.0, end: float = 0.0) -> s
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         Path(tmp.name).unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg failed:\n{result.stderr.decode()}")
+        err = (result.stderr or b"").decode(errors="replace")
+        raise RuntimeError(f"ffmpeg failed:\n{err}")
 
     return tmp.name
 
 
 # ── Upload tab ────────────────────────────────────────────────────────────────
 
-def run_transcription(file, model_key, do_diarize, num_speakers, start_time, end_time, progress=gr.Progress()):
+def run_transcription(file, model_key, do_diarize, min_spk, max_spk, start_time, end_time, progress=gr.Progress()):
     if file is None:
         raise gr.Error("Please upload an audio file first.")
 
     progress(0.05, desc="Preprocessing audio")
     evict_model_if_changed(model_key)
-    repo = MODEL_MAP[model_key]
     t0   = time.time()
 
-    cleaned = preprocess_audio(str(file), start=float(start_time or 0), end=float(end_time or 0))
+    raw_stem = Path(str(file)).stem.strip() or "audio"
+    _bad = '<>:"/\\|?*'
+    out_stem = ("".join(c if c not in _bad else "_" for c in raw_stem))[:120] or "audio"
+    saves_ref = f"{out_stem}.wav"
+
+    work_path = _copy_upload_for_processing(str(file))
+    cleaned = None
     try:
-        progress(0.2, desc="Transcribing")
-        result = mlx_whisper.transcribe(
-            cleaned,
-            path_or_hf_repo=repo,
-            **WHISPER_FULL_KWARGS,
-        )
+        try:
+            cleaned = preprocess_audio(
+                work_path,
+                start=float(start_time or 0),
+                end=float(end_time or 0),
+            )
+        except RuntimeError as e:
+            raise gr.Error(str(e)) from e
 
-        segments = result.get("segments", [])
-        if not segments:
-            raise gr.Error("No speech detected in the file.")
+        try:
+            progress(0.15, desc="Transcribing")
 
-        if do_diarize:
-            progress(0.75, desc="Identifying speakers")
-            diarize_wav = None
-            try:
-                import mlx.core as mx
-                mx.clear_cache()
-                diarize_wav = extract_audio_for_diarization(
-                    file,
-                    start=float(start_time or 0),
-                    end=float(end_time or 0),
-                )
-                turns = run_diarization(diarize_wav, num_speakers=int(num_speakers or 0))
-                segments = assign_speakers(segments, turns)
-                _save_diarization(turns, file)
-            except RuntimeError as e:
-                raise gr.Error(str(e))
-            finally:
-                if diarize_wav:
-                    Path(diarize_wav).unlink(missing_ok=True)
+            _result: list = [None]
+            _err: list = [None]
+
+            def _whisper():
+                try:
+                    _result[0] = transcribe_any(
+                        cleaned,
+                        model_key=model_key,
+                        live=False,
+                    )
+                except Exception as e:
+                    _err[0] = e
+
+            t = threading.Thread(target=_whisper, daemon=True)
+            t.start()
+
+            p = 0.15
+            while t.is_alive():
+                time.sleep(0.4)
+                p = min(p + 0.008, 0.68)
+                progress(p, desc="Transcribing")
+            t.join()
+
+            if _err[0]:
+                raise gr.Error(str(_err[0])) from _err[0]
+            result = _result[0]
+
+            segments = result.get("segments", [])
+            if not segments:
+                raise gr.Error("No speech detected in the file.")
+
+            if do_diarize:
+                progress(0.72, desc="Identifying speakers")
+                diarize_wav = None
+                try:
+                    try:
+                        import mlx.core as mx  # type: ignore
+
+                        mx.clear_cache()
+                    except Exception:
+                        pass
+                    diarize_wav = extract_audio_for_diarization(
+                        work_path,
+                        start=float(start_time or 0),
+                        end=float(end_time or 0),
+                    )
+                    turns = run_diarization(
+                        diarize_wav,
+                        min_speakers=int(min_spk or 0),
+                        max_speakers=int(max_spk or 0),
+                    )
+                    segments = assign_speakers(segments, turns)
+                    _save_diarization(turns, saves_ref)
+                    _save_word_diarization(segments, saves_ref)
+                except RuntimeError as e:
+                    raise gr.Error(str(e))
+                finally:
+                    if diarize_wav:
+                        Path(diarize_wav).unlink(missing_ok=True)
+        finally:
+            if cleaned:
+                Path(cleaned).unlink(missing_ok=True)
     finally:
-        Path(cleaned).unlink(missing_ok=True)
+        Path(work_path).unlink(missing_ok=True)
 
     elapsed  = time.time() - t0
     duration = segments[-1]["end"]
@@ -435,7 +606,7 @@ def run_transcription(file, model_key, do_diarize, num_speakers, start_time, end
     out_path = Path(out_path_str)
     out_path.write_text(segments_to_file(segments), encoding="utf-8")
 
-    _save_transcript(segments, file)
+    _save_transcript(segments, saves_ref)
 
     stats = (
         f"duration: {int(duration//60)}:{int(duration%60):02d}  ·  "
@@ -446,7 +617,12 @@ def run_transcription(file, model_key, do_diarize, num_speakers, start_time, end
     progress(1.0, desc="Done")
     return (
         segments_to_html(segments),
-        gr.DownloadButton(value=str(out_path), visible=True, label="Download transcript ⬇"),
+        gr.DownloadButton(
+            value=str(out_path),
+            visible=True,
+            label="Download transcript ⬇",
+            elem_classes=["stt-download-btn"],
+        ),
         stats,
     )
 
@@ -458,10 +634,10 @@ def _transcribe_buffer(buffer, sr, secs_done, chunk_count, transcript, model_key
     sf.write(tmp.name, buffer, sr, subtype="PCM_16")
     tmp.close()
     try:
-        result = mlx_whisper.transcribe(
+        result = transcribe_any(
             tmp.name,
-            path_or_hf_repo=MODEL_MAP[model_key],
-            **WHISPER_LIVE_KWARGS,
+            model_key=model_key,
+            live=True,
         )
     finally:
         Path(tmp.name).unlink(missing_ok=True)
@@ -519,11 +695,16 @@ def save_live_transcript(transcript):
     out_fd, out_path_str = tempfile.mkstemp(suffix=".txt")
     os.close(out_fd)
     Path(out_path_str).write_text(transcript, encoding="utf-8")
-    return gr.DownloadButton(value=out_path_str, visible=True, label="Download transcript ⬇")
+    return gr.DownloadButton(
+        value=out_path_str,
+        visible=True,
+        label="Download transcript ⬇",
+        elem_classes=["stt-download-btn"],
+    )
 
 
 def clear_live():
-    return "", None, 0.0, 0, "", gr.DownloadButton(visible=False)
+    return "", None, 0.0, 0, "", gr.DownloadButton(visible=False, elem_classes=["stt-download-btn"])
 
 
 # ── Layout ────────────────────────────────────────────────────────────────────
@@ -588,7 +769,7 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
         // watch the start/end number inputs and update the highlight
         function watchRegionInputs() {
             const inputs = document.querySelectorAll(
-                '#start-time input[type=number], #end-time input[type=number]'
+                '#start-end-region-inputs input[type=number]'
             );
             if (inputs.length < 2) { setTimeout(watchRegionInputs, 500); return; }
             const update = () => {
@@ -603,55 +784,73 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
         </script>
     """)
 
+    if get_backend() == "none":
+        gr.Markdown(describe_backend_failures(), elem_classes=["backend-setup-warning"])
+
     with gr.Tabs():
 
         # ── Tab 1: Upload ─────────────────────────────────────────────────
         with gr.Tab("Upload"):
-            with gr.Row():
-                with gr.Column(scale=1, min_width=300, elem_classes="controls-col"):
-                    file_input = gr.Audio(
-                        label="Audio / video file",
-                        type="filepath",
-                        elem_id="upload-audio",
-                    )
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=1, min_width=320, elem_classes="controls-col"):
+                    # Put elem_id on a wrapper: Audio + label would otherwise emit <label for="id"> without a matching control id.
+                    gr.Markdown("### Audio / video file", elem_classes=["transcript-block-heading"])
+                    with gr.Column(elem_id="upload-audio"):
+                        file_input = gr.Audio(
+                            type="filepath",
+                            label=None,
+                            show_label=False,
+                        )
                     model_picker = gr.Dropdown(
                         choices=list(MODEL_MAP.keys()),
                         value="large-v3-4bit",
                         label="Model",
                         info="4bit = fast  ·  large-v3 = max accuracy",
                     )
-                    with gr.Row():
-                        start_time = gr.Number(label="Start (s)", value=0, minimum=0, scale=1, elem_id="start-time")
-                        end_time   = gr.Number(label="End (s)",   value=0, minimum=0, scale=1, elem_id="end-time",
+                    with gr.Row(elem_id="start-end-region-inputs"):
+                        start_time = gr.Number(label="Start (s)", value=0, minimum=0, scale=1)
+                        end_time   = gr.Number(label="End (s)",   value=0, minimum=0, scale=1,
                                                info="0 = until end")
                     diarize_check = gr.Checkbox(
                         label="Speaker diarization",
                         value=False,
                     )
-                    num_speakers = gr.Number(
-                        label="Number of speakers",
-                        value=0,
-                        minimum=0,
-                        precision=0,
-                        info="0 = auto-detect",
-                        visible=False,
-                    )
+                    with gr.Row():
+                        min_speakers = gr.Number(
+                            label="Min speakers",
+                            value=0,
+                            minimum=0,
+                            precision=0,
+                            scale=1,
+                            info="0 = auto",
+                        )
+                        max_speakers = gr.Number(
+                            label="Max speakers",
+                            value=0,
+                            minimum=0,
+                            precision=0,
+                            scale=1,
+                            info="0 = auto",
+                        )
                     run_btn = gr.Button(
                         "Transcribe",
                         variant="primary",
                         elem_id="transcribe-btn",
                     )
 
-                with gr.Column(scale=2):
+                with gr.Column(scale=2, min_width=400):
+                    # gr.HTML with label= emits <label for="elem_id"> but no matching control id — bad for a11y audits.
+                    gr.Markdown("### Transcript", elem_classes=["transcript-block-heading"])
                     transcript_box = gr.HTML(
                         value='<div class="placeholder">$ _</div>',
                         elem_id="transcript-box",
-                        label="Transcript",
+                        label=None,
+                        show_label=False,
                     )
                     download_btn = gr.DownloadButton(
                         label="Download transcript ⬇",
                         visible=False,
-                        elem_id="download-btn",
+                        elem_classes=["stt-download-btn"],
                     )
                     stats_md = gr.Markdown(elem_id="stats")
 
@@ -673,11 +872,13 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
                         label="Chunk size (sec)",
                         info="Lower = faster response · Higher = better accuracy",
                     )
+                    gr.Markdown("### Microphone", elem_classes=["transcript-block-heading"])
                     mic_input = gr.Audio(
                         sources=["microphone"],
                         streaming=True,
-                        label="Microphone",
                         type="numpy",
+                        label=None,
+                        show_label=False,
                     )
                     save_live_btn = gr.Button(
                         "Save transcript",
@@ -691,17 +892,19 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
                     )
 
                 with gr.Column(scale=2):
+                    gr.Markdown("### Live transcript", elem_classes=["transcript-block-heading"])
                     live_transcript = gr.Textbox(
-                        label="Live transcript",
                         lines=22,
                         elem_id="live-transcript",
                         placeholder="$ _",
                         interactive=False,
+                        label=None,
+                        show_label=False,
                     )
                     live_download_btn = gr.DownloadButton(
                         label="Download transcript ⬇",
                         visible=False,
-                        elem_id="live-download-btn",
+                        elem_classes=["stt-download-btn"],
                     )
                     live_stats = gr.Markdown(elem_id="live-stats")
 
@@ -713,15 +916,9 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 
     # ── Events ────────────────────────────────────────────────────────────
 
-    diarize_check.change(
-        fn=lambda v: gr.update(visible=v),
-        inputs=diarize_check,
-        outputs=num_speakers,
-    )
-
     run_btn.click(
         fn=run_transcription,
-        inputs=[file_input, model_picker, diarize_check, num_speakers, start_time, end_time],
+        inputs=[file_input, model_picker, diarize_check, min_speakers, max_speakers, start_time, end_time],
         outputs=[transcript_box, download_btn, stats_md],
     )
 
@@ -751,9 +948,10 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 
 
 if __name__ == "__main__":
+    inbrowser = os.environ.get("INBROWSER", "").strip().lower() in ("1", "true", "yes", "y")
     demo.launch(
         server_name="127.0.0.1",
-        server_port=7860,
-        inbrowser=True,
+        server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
+        inbrowser=inbrowser,
         theme=THEME,
     )

@@ -11,21 +11,131 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-import mlx_whisper
+_BACKEND = os.environ.get("WHISPER_BACKEND", "").strip().lower()  # "mlx" | "faster" | "openai" | ""
 
 
-MODEL_MAP = {
-    "large-v3-4bit": "mlx-community/whisper-large-v3-mlx-4bit",   # recommended: fast + accurate
-    "turbo-4bit":    "mlx-community/whisper-large-v3-turbo-q4",    # recommended for live
-    "large-v3":      "mlx-community/whisper-large-v3-mlx",         # max accuracy, slow
-    "turbo":         "mlx-community/whisper-large-v3-turbo",
-    "medium":        "mlx-community/whisper-medium-mlx",
-    "small":         "mlx-community/whisper-small-mlx",
+def _have_mlx() -> bool:
+    try:
+        import mlx_whisper  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _have_faster_whisper() -> bool:
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _faster_whisper_import_error() -> str | None:
+    """If faster-whisper cannot be imported, return a short error string for diagnostics."""
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
+def _torch_import_error() -> str | None:
+    try:
+        import torch  # noqa: F401
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
+def _have_openai_whisper() -> bool:
+    try:
+        import whisper  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def describe_backend_failures() -> str:
+    """Human-readable Markdown when no Whisper backend can start (for UI banner)."""
+    lines = [
+        "## Transcription is not ready on this PC\n",
+        "Whisper needs native libraries that are missing or cannot load.\n\n",
+    ]
+    te = _torch_import_error()
+    fe = _faster_whisper_import_error()
+    if te:
+        lines.append("**PyTorch** (used by the Whisper fallback here):\n")
+        lines.append(f"```\n{te}\n```\n\n")
+    if fe:
+        lines.append("**faster-whisper / CTranslate2** (optional faster path):\n")
+        lines.append(f"```\n{fe}\n```\n\n")
+    lines.append(
+        "**Fix (Windows):** install Microsoft **Visual C++ Redistributable for x64** from "
+        "[this Microsoft download](https://aka.ms/vs/17/release/vc_redist.x64.exe), "
+        "then **restart the machine** (or at least sign out and back in). "
+        "Reopen the terminal, activate `.venv`, and run `python app.py` again.\n\n"
+        "That same runtime is required for **PyTorch** and **CTranslate2**; without it, "
+        "upload → Transcribe will keep failing with a generic error."
+    )
+    return "".join(lines)
+
+
+def get_backend() -> str:
+    """
+    Select backend:
+    - macOS/Apple Silicon: mlx-whisper (if installed)
+    - otherwise: faster-whisper (if installed), else openai-whisper (CPU/GPU via PyTorch)
+    Override with env: WHISPER_BACKEND=mlx|faster|openai
+    """
+    if _BACKEND == "mlx" and _have_mlx():
+        return "mlx"
+    if _BACKEND == "faster" and _have_faster_whisper():
+        return "faster"
+    if _BACKEND == "openai" and _have_openai_whisper():
+        return "openai"
+    if _BACKEND in ("mlx", "faster", "openai"):
+        pass  # forced backend missing — fall through to auto
+    if _have_mlx():
+        return "mlx"
+    if _have_faster_whisper():
+        return "faster"
+    if _have_openai_whisper():
+        return "openai"
+    return "none"
+
+
+MODEL_MAP_MLX = {
+    "large-v3-4bit": "mlx-community/whisper-large-v3-mlx-4bit",  # recommended: fast + accurate
+    "turbo-4bit": "mlx-community/whisper-large-v3-turbo-q4",  # recommended for live
+    "large-v3": "mlx-community/whisper-large-v3-mlx",  # max accuracy, slow
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "small": "mlx-community/whisper-small-mlx",
 }
+
+# faster-whisper model identifiers. "4bit" here maps to lower-precision compute,
+# not an actual 4-bit weight format.
+MODEL_MAP_FASTER = {
+    "large-v3-4bit": "large-v3",
+    "turbo-4bit": "large-v3-turbo",
+    "large-v3": "large-v3",
+    "turbo": "large-v3-turbo",
+    "medium": "medium",
+    "small": "small",
+}
+
+
+def get_model_map() -> dict:
+    b = get_backend()
+    return MODEL_MAP_MLX if b == "mlx" else MODEL_MAP_FASTER
+
+
+MODEL_MAP = get_model_map()
 
 DEFAULT_MODEL = "large-v3"
 
@@ -116,8 +226,18 @@ def to_json(segments, audio_path: str, model: str) -> str:
 
 
 def transcribe(audio_path: Path, model_key: str, fmt: str) -> str:
-    repo = MODEL_MAP[model_key]
+    model_map = get_model_map()
+    backend = get_backend()
+    if backend == "none":
+        raise RuntimeError(
+            "No Whisper backend installed. Install mlx-whisper (macOS Apple Silicon), "
+            "faster-whisper (Windows/Linux; needs a working CTranslate2), or openai-whisper: "
+            "pip install openai-whisper"
+        )
 
+    repo = model_map[model_key]
+
+    print(f"Backend: {backend}")
     print(f"Model  : {model_key} ({repo})")
     print(f"File   : {audio_path}")
     print(f"Output : {fmt.upper()}")
@@ -126,10 +246,10 @@ def transcribe(audio_path: Path, model_key: str, fmt: str) -> str:
 
     t0 = time.time()
 
-    result = mlx_whisper.transcribe(
+    result = transcribe_any(
         str(audio_path),
-        path_or_hf_repo=repo,
-        **WHISPER_FULL_KWARGS,
+        model_key=model_key,
+        live=False,
     )
 
     elapsed = time.time() - t0
@@ -152,6 +272,189 @@ def transcribe(audio_path: Path, model_key: str, fmt: str) -> str:
         return to_json(segments, audio_path, model_key)
     else:
         return to_txt(segments)
+
+
+_fw_model = None
+_fw_model_key = None
+
+
+def _fw_compute_type_for_key(model_key: str) -> str:
+    # good default on CPU Windows; if user has CUDA they can override via env.
+    if model_key.endswith("-4bit"):
+        return os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "int8")
+    return os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "float16")
+
+
+def _fw_device() -> str:
+    return os.environ.get("FASTER_WHISPER_DEVICE", "cpu")
+
+
+def _fw_model_for_key(model_key: str):
+    global _fw_model, _fw_model_key
+    model_id = MODEL_MAP_FASTER[model_key]
+    compute_type = _fw_compute_type_for_key(model_key)
+    device = _fw_device()
+
+    # recreate model if key changes (compute type can differ)
+    if _fw_model is not None and _fw_model_key == (model_id, device, compute_type):
+        return _fw_model
+
+    from faster_whisper import WhisperModel
+
+    _fw_model = WhisperModel(
+        model_id,
+        device=device,
+        compute_type=compute_type,
+    )
+    _fw_model_key = (model_id, device, compute_type)
+    return _fw_model
+
+
+_openai_model = None
+_openai_model_id: str | None = None
+
+
+def reset_whisper_caches() -> None:
+    """Drop loaded faster-whisper / openai-whisper models (e.g. after UI model change)."""
+    global _fw_model, _fw_model_key, _openai_model, _openai_model_id
+    _fw_model = None
+    _fw_model_key = None
+    _openai_model = None
+    _openai_model_id = None
+
+
+def _openai_device() -> str:
+    d = os.environ.get("OPENAI_WHISPER_DEVICE", "").strip()
+    if d:
+        return d
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _openai_model_for_key(model_key: str):
+    """openai-whisper: same HF-style keys as faster-whisper map to load_model names."""
+    global _openai_model, _openai_model_id
+    model_id = MODEL_MAP_FASTER[model_key]
+    device = _openai_device()
+    if _openai_model is not None and _openai_model_id == f"{model_id}:{device}":
+        return _openai_model
+
+    import whisper
+
+    _openai_model = whisper.load_model(model_id, device=device)
+    _openai_model_id = f"{model_id}:{device}"
+    return _openai_model
+
+
+def transcribe_any(audio_path: str, model_key: str, live: bool) -> dict:
+    """
+    Returns a dict compatible with mlx_whisper.transcribe output:
+    { "segments": [ {start, end, text, words?}, ... ] }
+    """
+    backend = get_backend()
+    if backend == "none":
+        te = _torch_import_error()
+        fe = _faster_whisper_import_error()
+        parts = ["No working Whisper backend is available.\n"]
+        if te:
+            parts.append(f"\nPyTorch: {te}")
+        if fe:
+            parts.append(f"\nfaster-whisper/CTranslate2: {fe}")
+        parts.append(
+            "\n\nOn Windows, install Visual C++ Redistributable (x64) from:\n"
+            "  https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+            "then restart the PC and try again. (PyTorch and CTranslate2 both need it.)"
+        )
+        raise RuntimeError("".join(parts))
+    if backend == "mlx":
+        import mlx_whisper
+
+        repo = MODEL_MAP_MLX[model_key]
+        kwargs = WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS
+        return mlx_whisper.transcribe(
+            audio_path,
+            path_or_hf_repo=repo,
+            **kwargs,
+        )
+
+    if backend == "faster":
+        model = _fw_model_for_key(model_key)
+        kwargs = WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS
+
+        # Map common params; ignore thresholds that are mlx-specific.
+        segments_iter, info = model.transcribe(
+            audio_path,
+            language=kwargs.get("language", "ar"),
+            word_timestamps=bool(kwargs.get("word_timestamps", False)),
+            condition_on_previous_text=bool(kwargs.get("condition_on_previous_text", True)),
+            initial_prompt=kwargs.get("initial_prompt", None),
+            temperature=kwargs.get("temperature", 0.0),
+        )
+
+        segments_out = []
+        for seg in segments_iter:
+            seg_dict = {
+                "start": float(seg.start),
+                "end": float(seg.end),
+                "text": (seg.text or ""),
+            }
+            words = getattr(seg, "words", None)
+            if words:
+                seg_dict["words"] = [
+                    {
+                        "start": float(w.start),
+                        "end": float(w.end),
+                        "word": (w.word or ""),
+                    }
+                    for w in words
+                    if getattr(w, "start", None) is not None and getattr(w, "end", None) is not None
+                ]
+            segments_out.append(seg_dict)
+
+        return {"segments": segments_out, "info": getattr(info, "__dict__", {})}
+
+    if backend == "openai":
+        model = _openai_model_for_key(model_key)
+        kwargs = WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS
+        temp = kwargs.get("temperature", 0.0)
+        result = model.transcribe(
+            audio_path,
+            language=kwargs.get("language"),
+            verbose=bool(kwargs.get("verbose", False)),
+            word_timestamps=bool(kwargs.get("word_timestamps", False)),
+            condition_on_previous_text=bool(kwargs.get("condition_on_previous_text", True)),
+            initial_prompt=kwargs.get("initial_prompt"),
+            temperature=temp,
+            no_speech_threshold=kwargs.get("no_speech_threshold"),
+            logprob_threshold=kwargs.get("logprob_threshold"),
+            compression_ratio_threshold=kwargs.get("compression_ratio_threshold"),
+        )
+        segments_raw = result.get("segments") or []
+        segments_out: list[dict] = []
+        for seg in segments_raw:
+            seg_dict = {
+                "start": float(seg.get("start", 0.0)),
+                "end": float(seg.get("end", 0.0)),
+                "text": (seg.get("text") or ""),
+            }
+            words = seg.get("words")
+            if words:
+                seg_dict["words"] = [
+                    {
+                        "start": float(w.get("start", seg_dict["start"])),
+                        "end": float(w.get("end", seg_dict["end"])),
+                        "word": (w.get("word", "") or ""),
+                    }
+                    for w in words
+                    if w.get("start") is not None and w.get("end") is not None
+                ]
+            segments_out.append(seg_dict)
+        return {"segments": segments_out}
+
+    raise RuntimeError("Unsupported backend selection.")
 
 
 def main():

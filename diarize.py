@@ -30,6 +30,14 @@ def load_pipeline(token: str = ""):
     if _pipeline is not None:
         return _pipeline
 
+    # pyannote's checkpoint loader calls inspect.stack() which accesses
+    # sys.modules['__main__']. Under `gradio app.py` hot-reload the module
+    # is compiled as '<string>' and '__main__' is absent — patch it in.
+    import sys
+    import types
+    if "__main__" not in sys.modules:
+        sys.modules["__main__"] = types.ModuleType("__main__")
+
     from pyannote.audio import Pipeline
     import torch
 
@@ -60,18 +68,29 @@ def load_pipeline(token: str = ""):
     else:
         _pipeline.to(torch.device("cpu"))
 
-    _pipeline.segmentation_batch_size = 64
-    _pipeline.embedding_batch_size = 64
+    _pipeline.segmentation_batch_size = 8
+    _pipeline.embedding_batch_size = 8
 
     return _pipeline
 
 
-def run_diarization(audio_path: str, token: str = "", num_speakers: int = 0) -> list[tuple[float, float, str]]:
+def run_diarization(
+    audio_path: str,
+    token: str = "",
+    num_speakers: int = 0,
+    min_speakers: int = 0,
+    max_speakers: int = 0,
+) -> list[tuple[float, float, str]]:
     """Returns (start_sec, end_sec, speaker_label) tuples sorted by start time."""
     pipeline = load_pipeline(token)
     kwargs = {}
     if num_speakers > 0:
         kwargs["num_speakers"] = num_speakers
+    else:
+        if min_speakers > 0:
+            kwargs["min_speakers"] = min_speakers
+        if max_speakers > 0:
+            kwargs["max_speakers"] = max_speakers
     result = pipeline(audio_path, **kwargs)
     annotation = (
         result.speaker_diarization if hasattr(result, "speaker_diarization")
@@ -113,6 +132,23 @@ def assign_speakers(
             all_words.append({"start": seg["start"], "end": seg["end"],
                                "word": seg["text"].strip()})
     all_words.sort(key=lambda w: w["start"])
+
+    # Snap each turn's start time to the nearest inter-word gap within 500 ms.
+    # Pyannote detects boundaries at fixed window steps (~250 ms), so the true
+    # speaker change — which always falls between words — can be off by that much.
+    # Snapping to the nearest silence gives a more accurate boundary than any
+    # fixed offset.
+    word_gaps = [
+        (all_words[i]["end"] + all_words[i + 1]["start"]) / 2
+        for i in range(len(all_words) - 1)
+        if all_words[i + 1]["start"] > all_words[i]["end"]
+    ]
+
+    def snap(t: float, window: float = 0.5) -> float:
+        nearby = [g for g in word_gaps if abs(g - t) <= window]
+        return min(nearby, key=lambda g: abs(g - t)) if nearby else t
+
+    turns = [(snap(ts), te, spk) for ts, te, spk in turns]
 
     # Assign each word to its best (shortest) overlapping raw turn.
     # Fall back to nearest turn for words that land in a gap.
