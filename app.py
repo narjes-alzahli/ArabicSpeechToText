@@ -5,8 +5,10 @@ Run: python app.py
 """
 
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,6 +26,9 @@ if _env.exists():
 _app_gradio_tmp = Path(__file__).parent / ".gradio_temp"
 _app_gradio_tmp.mkdir(exist_ok=True)
 os.environ.setdefault("GRADIO_TEMP_DIR", str(_app_gradio_tmp.resolve()))
+_ui_upload_dir = _app_gradio_tmp / "ui_uploads"
+_ui_upload_dir.mkdir(exist_ok=True)
+_certs_dir = Path(__file__).parent / ".certs"
 
 import numpy as np
 import soundfile as sf
@@ -73,8 +78,58 @@ def _ffmpeg_executable() -> str:
     )
 
 
+_AUDIO_SUFFIXES = {
+    ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mp4", ".mpeg", ".mpga", ".aac",
+}
+
+
+def _audio_path_from_upload(audio) -> str | None:
+    if audio is None:
+        return None
+    if isinstance(audio, str):
+        return audio
+    if isinstance(audio, dict):
+        return audio.get("path") or audio.get("name")
+    return getattr(audio, "path", None) or getattr(audio, "name", None)
+
+
+def stage_upload_audio(audio) -> str | None:
+    """
+    Copy uploads to ASCII-only paths under .gradio_temp so the browser can play them.
+    Arabic/special characters in filenames often break Gradio file serving on Windows.
+    """
+    path = _audio_path_from_upload(audio)
+    if not path:
+        return None
+    src = Path(path)
+    if not src.is_file():
+        return path
+    resolved = str(src.resolve())
+    # Already safe — return unchanged so the player is not asked to reload (avoids AbortError).
+    if resolved.isascii():
+        return resolved
+    try:
+        if src.parent.resolve() == _ui_upload_dir.resolve():
+            return resolved
+    except OSError:
+        pass
+    suffix = src.suffix.lower() if src.suffix else ".bin"
+    if suffix not in _AUDIO_SUFFIXES:
+        suffix = ".bin"
+    dest = _ui_upload_dir / f"audio_{int(time.time() * 1000)}{suffix}"
+    try:
+        shutil.copy2(src, dest)
+    except (PermissionError, OSError) as e:
+        raise gr.Error(
+            "Could not read the uploaded file. Try again or use a simpler file name."
+        ) from e
+    return str(dest.resolve())
+
+
 def _copy_upload_for_processing(upload_path: str) -> str:
     """Copy Gradio’s upload to a short path so ffmpeg/subprocess can open it reliably on Windows."""
+    staged = stage_upload_audio(upload_path)
+    upload_path = staged or upload_path
     src = Path(upload_path)
     if not src.is_file():
         raise gr.Error("Uploaded file is missing or not readable.")
@@ -90,6 +145,116 @@ def _copy_upload_for_processing(upload_path: str) -> str:
             "or copy the file to your Desktop and upload again."
         ) from e
     return dest
+
+
+def _ssl_enabled() -> bool:
+    return os.environ.get("GRADIO_ENABLE_SSL", "").strip().lower() in ("1", "true", "yes", "y")
+
+
+def _find_openssl() -> str | None:
+    found = shutil.which("openssl")
+    if found:
+        return found
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    for guess in (
+        Path(program_files) / "Git" / "usr" / "bin" / "openssl.exe",
+        Path(program_files) / "OpenSSL-Win64" / "bin" / "openssl.exe",
+        Path(r"C:\Program Files\Git\usr\bin\openssl.exe"),
+    ):
+        if guess.is_file():
+            return str(guess)
+    return None
+
+
+def _looks_like_ip(host: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host))
+
+
+def _ensure_ssl_certs() -> tuple[str, str] | None:
+    """Return (cert, key) paths; generate self-signed material when GRADIO_ENABLE_SSL is set."""
+    explicit_cert = os.environ.get("SSL_CERTFILE", "").strip().strip('"')
+    explicit_key = os.environ.get("SSL_KEYFILE", "").strip().strip('"')
+    if explicit_cert and explicit_key:
+        if Path(explicit_cert).is_file() and Path(explicit_key).is_file():
+            return explicit_cert, explicit_key
+        print("SSL_CERTFILE / SSL_KEYFILE are set but files are missing.", file=sys.stderr)
+        return None
+
+    if not _ssl_enabled():
+        return None
+
+    _certs_dir.mkdir(exist_ok=True)
+    cert_file = _certs_dir / "cert.pem"
+    key_file = _certs_dir / "key.pem"
+    if cert_file.is_file() and key_file.is_file():
+        return str(cert_file), str(key_file)
+
+    openssl = _find_openssl()
+    if not openssl:
+        print(
+            "GRADIO_ENABLE_SSL is set but openssl was not found. "
+            "Install OpenSSL (e.g. via Git for Windows) or set SSL_CERTFILE and SSL_KEYFILE.",
+            file=sys.stderr,
+        )
+        return None
+
+    cn = os.environ.get("SSL_CN", os.environ.get("GRADIO_SERVER_NAME", "localhost")).strip() or "localhost"
+    if _looks_like_ip(cn):
+        san = f"IP:{cn},DNS:localhost"
+    else:
+        san = f"DNS:{cn},DNS:localhost"
+
+    cmd = [
+        openssl,
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(key_file),
+        "-out",
+        str(cert_file),
+        "-days",
+        "825",
+        "-subj",
+        f"/CN={cn}",
+        "-addext",
+        f"subjectAltName={san}",
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        cmd = [c for c in cmd if c != "-addext" and c != f"subjectAltName={san}"]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or b"").decode(errors="replace")
+            print(f"Could not generate SSL certificate:\n{err}", file=sys.stderr)
+            return None
+
+    if cert_file.is_file() and key_file.is_file():
+        print(f"Generated self-signed certificate in {_certs_dir}", file=sys.stderr)
+        return str(cert_file), str(key_file)
+    return None
+
+
+def _launch_kwargs(*, inbrowser: bool) -> dict:
+    server_name = os.environ.get("GRADIO_SERVER_NAME", "172.24.4.204").strip() or "0.0.0.0"
+    port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+    kwargs: dict = {
+        "server_name": server_name,
+        "server_port": port,
+        "inbrowser": inbrowser,
+        "theme": THEME,
+        "css": CSS,
+        "allowed_paths": [str(_app_gradio_tmp.resolve())],
+    }
+    ssl = _ensure_ssl_certs()
+    if ssl:
+        kwargs["ssl_certfile"], kwargs["ssl_keyfile"] = ssl
+        kwargs["ssl_verify"] = False
+    return kwargs
 
 
 # ── Theme & CSS ───────────────────────────────────────────────────────────────
@@ -422,8 +587,13 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 .transcript-card #stats,
 .transcript-card #live-stats {
     border-top: 1px solid #e8e2d6 !important;
-    margin-top: 6px !important;
-    padding-top: 6px !important;
+    margin-top: 8px !important;
+    padding-top: 8px !important;
+    font-family: 'Segoe UI', 'Tahoma', 'Arial', sans-serif !important;
+    font-size: 0.78rem !important;
+    color: #9e9188 !important;
+    text-align: right !important;
+    direction: rtl !important;
 }
 
 /* ── controls panel (live tab) ── */
@@ -455,8 +625,8 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 /* ── live transcript ── */
 #live-transcript { height: 100% !important; }
 #live-transcript textarea {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.88rem !important;
+    font-family: 'Segoe UI', 'Tahoma', 'Arial', sans-serif !important;
+    font-size: 0.95rem !important;
     line-height: 1.8 !important;
     color: #2c2825 !important;
     background: #ffffff !important;
@@ -465,6 +635,8 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     min-height: 380px !important;
     padding: 16px !important;
     resize: none !important;
+    direction: rtl !important;
+    text-align: right !important;
 }
 #live-transcript textarea::placeholder { color: #d4cec8 !important; }
 
@@ -484,34 +656,78 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 }
 
 /* ── clickable transcript (upload tab) ── */
-#transcript-box { height: 100% !important; }
+/* Gradio wraps gr.HTML in extra divs — do not style those (avoids a second scroll strip). */
+#transcript-box,
+#transcript-box > .form,
+#transcript-box > .block,
 #transcript-box > div {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.88rem;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+}
+#transcript-box textarea,
+#transcript-box pre,
+#transcript-box code {
+    display: none !important;
+}
+#transcript-box .transcript-body {
+    font-family: 'Segoe UI', 'Tahoma', 'Arial', sans-serif;
+    font-size: 0.95rem;
     line-height: 1.8;
     background: #ffffff;
     border: 1px solid #e8e2d6;
     border-radius: 8px;
     min-height: 380px;
+    max-height: min(70vh, 720px);
     padding: 16px;
     overflow-y: auto;
     color: #2c2825;
+    direction: rtl;
+    text-align: right;
+    unicode-bidi: isolate;
 }
-#transcript-box .placeholder { color: #d4cec8; }
-#transcript-box .seg { margin-bottom: 1.4em; }
+#transcript-box .transcript-body.transcript-empty {
+    min-height: 200px;
+}
+#transcript-box .seg {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35em 0.75em;
+    margin-bottom: 1.4em;
+    direction: rtl;
+    text-align: right;
+}
+#transcript-box .seg-text {
+    flex: 1 1 auto;
+    min-width: 10em;
+}
 #transcript-box .ts {
+    font-family: 'IBM Plex Mono', monospace;
     font-size: 0.72em;
     color: #c4bab0;
     cursor: pointer;
-    margin-right: 8px;
+    margin-inline-end: 8px;
     user-select: none;
+    unicode-bidi: embed;
+    direction: ltr;
+    display: inline-block;
 }
 #transcript-box .ts:hover { color: #9e9188; }
 #transcript-box .spk {
     font-size: 0.78em;
     font-weight: 600;
     color: #a08060;
-    margin-right: 6px;
+    margin-inline-end: 6px;
+    unicode-bidi: embed;
+    direction: ltr;
+    display: inline-block;
 }
 #transcript-box .word {
     cursor: pointer;
@@ -520,7 +736,6 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     transition: background 0.1s;
 }
 #transcript-box .word:hover { background: #ede8df; }
-
 /* ── labels ── */
 label, .label-wrap span, fieldset legend {
     font-family: 'Inter', sans-serif !important;
@@ -612,10 +827,45 @@ def evict_model_if_changed(new_model_key: str):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_EMPTY_TRANSCRIPT_HTML = (
+    '<div class="transcript-body transcript-empty" dir="rtl" lang="ar"></div>'
+)
+
+
+def fmt_duration_ar(seconds: float) -> str:
+    """Human-readable Arabic duration: seconds only below 60, else minutes/hours."""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s} ثانية"
+    m, sec = divmod(s, 60)
+    if s < 3600:
+        parts = [f"{m} دقيقة"] if m else []
+        if sec:
+            parts.append(f"{sec} ثانية")
+        return " و ".join(parts)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    parts = [f"{h} ساعة"] if h else []
+    if m:
+        parts.append(f"{m} دقيقة")
+    if sec:
+        parts.append(f"{sec} ثانية")
+    return " و ".join(parts)
+
+
+def reset_transcript_ui():
+    """Clear transcript area when starting a new run."""
+    return (
+        _EMPTY_TRANSCRIPT_HTML,
+        gr.DownloadButton(visible=False, elem_classes=["stt-download-btn"]),
+        "",
+    )
+
+
 def segments_to_html(segments) -> str:
     """Renders transcript as clickable word spans. Clicking a word seeks the audio player."""
     if not segments:
-        return '<div class="placeholder">$ _</div>'
+        return _EMPTY_TRANSCRIPT_HTML + "\n"
 
     parts = []
     for seg in segments:
@@ -628,7 +878,7 @@ def segments_to_html(segments) -> str:
         seg_end   = seg["end"]
         ts_html = (
             f'<span class="ts" onclick="seekAudio({seg_start:.3f})">'
-            f'[{fmt_ts(seg_start)} → {fmt_ts(seg_end)}]</span>'
+            f'[{fmt_ts(seg_start)} ← {fmt_ts(seg_end)}]</span>'
         )
 
         words = seg.get("words") or []
@@ -649,9 +899,16 @@ def segments_to_html(segments) -> str:
                 f'{seg["text"].strip()}</span>'
             )
 
-        parts.append(f'<div class="seg">{spk_html}{ts_html} {words_html}</div>')
+        parts.append(
+            f'<div class="seg">{ts_html}{spk_html}'
+            f'<span class="seg-text">{words_html}</span></div>'
+        )
 
-    return "\n".join(parts)
+    return (
+        f'<div class="transcript-body" dir="rtl" lang="ar">\n'
+        + "\n".join(parts)
+        + "\n</div>"
+    )
 
 
 def segments_to_file(segments) -> str:
@@ -868,7 +1125,6 @@ def run_transcription(
 
     elapsed  = time.time() - t0
     duration = segments[-1]["end"]
-    speed    = duration / elapsed if elapsed > 0 else 0
 
     out_fd, out_path_str = tempfile.mkstemp(suffix=".txt")
     os.close(out_fd)
@@ -878,9 +1134,8 @@ def run_transcription(
     _save_transcript(segments, saves_ref)
 
     stats = (
-        f"duration: {int(duration//60)}:{int(duration%60):02d}  ·  "
-        f"processing: {elapsed:.0f}s  ·  "
-        f"speed: {speed:.1f}x real-time"
+        f"مدة التسجيل: {fmt_duration_ar(duration)} · "
+        f"وقت المعالجة: {fmt_duration_ar(elapsed)}"
     )
 
     progress(1.0, desc="Done")
@@ -978,7 +1233,7 @@ def clear_live():
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
+with gr.Blocks(title="Arabic Speech to Text") as demo:
 
     gr.HTML("""
         <div id="topbar">
@@ -1206,8 +1461,7 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
                                 minimum=0,
                                 precision=0,
                             )
-                with gr.Row(elem_classes=["upload-settings-row"]):
-                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                    with gr.Column(elem_classes=["settings-tile"], scale=2):
                         gr.Markdown("### Hints", elem_classes=["settings-tile-heading"])
                         hint_input = gr.Textbox(
                             lines=2,
@@ -1230,10 +1484,13 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
                 with gr.Column(elem_classes=["transcript-card"]):
                     gr.Markdown("### Transcript", elem_classes=["settings-tile-heading"])
                     transcript_box = gr.HTML(
-                        value='<div class="placeholder">$ _</div>',
+                        value='<div class="transcript-body transcript-empty" dir="rtl" lang="ar"></div>',
                         elem_id="transcript-box",
                         label=None,
                         show_label=False,
+                        container=False,
+                        padding=False,
+                        apply_default_css=False,
                     )
                     with gr.Row():
                         download_btn = gr.DownloadButton(
@@ -1297,10 +1554,11 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
                     live_transcript = gr.Textbox(
                         lines=22,
                         elem_id="live-transcript",
-                        placeholder="$ _",
+                        placeholder="",
                         interactive=False,
                         label=None,
                         show_label=False,
+                        rtl=True,
                     )
                     with gr.Row():
                         live_download_btn = gr.DownloadButton(
@@ -1319,7 +1577,16 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 
     # ── Events ────────────────────────────────────────────────────────────
 
+    file_input.upload(
+        fn=stage_upload_audio,
+        inputs=[file_input],
+        outputs=[file_input],
+    )
+
     run_btn.click(
+        fn=reset_transcript_ui,
+        outputs=[transcript_box, download_btn, stats_md],
+    ).then(
         fn=run_transcription,
         inputs=[
             file_input,
@@ -1332,6 +1599,7 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
             hint_input,
         ],
         outputs=[transcript_box, download_btn, stats_md],
+        show_progress="minimal",
     )
 
     mic_input.stream(
@@ -1361,9 +1629,10 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 
 if __name__ == "__main__":
     inbrowser = os.environ.get("INBROWSER", "").strip().lower() in ("1", "true", "yes", "y")
-    demo.launch(
-        server_name="172.24.4.204",
-        server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
-        inbrowser=inbrowser,
-        theme=THEME,
-    )
+    launch_kw = _launch_kwargs(inbrowser=inbrowser)
+    ssl = launch_kw.get("ssl_certfile")
+    host = launch_kw["server_name"]
+    port = launch_kw["server_port"]
+    scheme = "https" if ssl else "http"
+    print(f"Open: {scheme}://{host}:{port}", file=sys.stderr)
+    demo.launch(**launch_kw)

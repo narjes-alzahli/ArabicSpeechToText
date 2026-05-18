@@ -1,5 +1,6 @@
 venv/
 .gradio_temp/
+.certs/
 .env
 __pycache__/
 *.pyc

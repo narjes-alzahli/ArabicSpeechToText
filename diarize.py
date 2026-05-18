@@ -10,6 +10,7 @@ Requirements:
 """
 
 import os
+from pathlib import Path
 
 _pipeline = None
 
@@ -22,7 +23,7 @@ def speaker_label(pyannote_label: str) -> str:
         letter = _SPEAKER_LABELS[n] if n < len(_SPEAKER_LABELS) else str(n + 1)
     except (ValueError, IndexError):
         letter = pyannote_label
-    return f"[Speaker {letter}]"
+    return f"[متحدث {letter}]"
 
 
 def load_pipeline(token: str = ""):
@@ -74,6 +75,33 @@ def load_pipeline(token: str = ""):
     return _pipeline
 
 
+def _load_audio_for_pyannote(audio_path: str) -> dict:
+    """
+    Load WAV in-memory for pyannote. On Windows, torchcodec often fails to load
+    (missing FFmpeg DLLs), so file paths break diarization unless we pass waveform.
+    """
+    import soundfile as sf
+    import torch
+
+    path = Path(audio_path)
+    if not path.is_file():
+        raise RuntimeError(f"Diarization audio not found: {path}")
+
+    data, sr = sf.read(str(path), always_2d=True, dtype="float32")
+    # soundfile: (time, channels) → pyannote expects (channel, time)
+    waveform = torch.from_numpy(data.T.copy())
+    if waveform.ndim != 2:
+        raise RuntimeError("Unexpected audio shape from soundfile.")
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+
+    return {
+        "waveform": waveform,
+        "sample_rate": int(sr),
+        "uri": path.stem,
+    }
+
+
 def run_diarization(
     audio_path: str,
     token: str = "",
@@ -91,7 +119,8 @@ def run_diarization(
             kwargs["min_speakers"] = min_speakers
         if max_speakers > 0:
             kwargs["max_speakers"] = max_speakers
-    result = pipeline(audio_path, **kwargs)
+    audio_input = _load_audio_for_pyannote(audio_path)
+    result = pipeline(audio_input, **kwargs)
     annotation = (
         result.speaker_diarization if hasattr(result, "speaker_diarization")
         else result.diarization if hasattr(result, "diarization")
