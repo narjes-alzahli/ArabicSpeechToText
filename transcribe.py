@@ -139,6 +139,20 @@ MODEL_MAP = get_model_map()
 
 DEFAULT_MODEL = "large-v3"
 
+# Default text priming Whisper (initial_prompt) — UI hints are appended to these.
+DEFAULT_INITIAL_PROMPT_FULL = "هذا تسجيل باللغة العربية"
+DEFAULT_INITIAL_PROMPT_LIVE = "هذا كلام باللغة العربية."
+
+
+def build_initial_prompt(user_hint: str | None = None, *, live: bool = False) -> str:
+    """Merge optional user hints with the built-in Arabic priming sentence."""
+    base = DEFAULT_INITIAL_PROMPT_LIVE if live else DEFAULT_INITIAL_PROMPT_FULL
+    hint = (user_hint or "").strip()
+    if not hint:
+        return base
+    return f"{base} {hint}"
+
+
 # Shared Whisper kwargs — used by both CLI and UI
 WHISPER_FULL_KWARGS = dict(
     language="ar",
@@ -149,7 +163,7 @@ WHISPER_FULL_KWARGS = dict(
     compression_ratio_threshold=3.0,
     condition_on_previous_text=True,
     temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-    initial_prompt="هذا تسجيل لاجتماع باللغة العربية.",
+    initial_prompt=DEFAULT_INITIAL_PROMPT_FULL,
 )
 
 WHISPER_LIVE_KWARGS = dict(
@@ -160,7 +174,7 @@ WHISPER_LIVE_KWARGS = dict(
     logprob_threshold=-2.0,
     condition_on_previous_text=True,
     temperature=(0.0, 0.4, 0.8),
-    initial_prompt="هذا كلام باللغة العربية.",
+    initial_prompt=DEFAULT_INITIAL_PROMPT_LIVE,
 )
 
 
@@ -349,12 +363,21 @@ def _openai_model_for_key(model_key: str):
     return _openai_model
 
 
-def transcribe_any(audio_path: str, model_key: str, live: bool) -> dict:
+def transcribe_any(
+    audio_path: str,
+    model_key: str,
+    live: bool,
+    user_hint: str | None = None,
+) -> dict:
     """
     Returns a dict compatible with mlx_whisper.transcribe output:
     { "segments": [ {start, end, text, words?}, ... ] }
+
+    user_hint: optional extra text appended to the default Arabic initial_prompt.
     """
     backend = get_backend()
+    kwargs = dict(WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS)
+    kwargs["initial_prompt"] = build_initial_prompt(user_hint, live=live)
     if backend == "none":
         te = _torch_import_error()
         fe = _faster_whisper_import_error()
@@ -373,7 +396,6 @@ def transcribe_any(audio_path: str, model_key: str, live: bool) -> dict:
         import mlx_whisper
 
         repo = MODEL_MAP_MLX[model_key]
-        kwargs = WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS
         return mlx_whisper.transcribe(
             audio_path,
             path_or_hf_repo=repo,
@@ -382,7 +404,6 @@ def transcribe_any(audio_path: str, model_key: str, live: bool) -> dict:
 
     if backend == "faster":
         model = _fw_model_for_key(model_key)
-        kwargs = WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS
 
         # Map common params; ignore thresholds that are mlx-specific.
         segments_iter, info = model.transcribe(
@@ -418,7 +439,6 @@ def transcribe_any(audio_path: str, model_key: str, live: bool) -> dict:
 
     if backend == "openai":
         model = _openai_model_for_key(model_key)
-        kwargs = WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS
         temp = kwargs.get("temperature", 0.0)
         result = model.transcribe(
             audio_path,

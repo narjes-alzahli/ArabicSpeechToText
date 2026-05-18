@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Arabic STT — Gradio UI
 Run: python app.py
@@ -30,6 +30,7 @@ import soundfile as sf
 import gradio as gr
 
 from transcribe import (
+    DEFAULT_INITIAL_PROMPT_FULL,
     MODEL_MAP,
     describe_backend_failures,
     fmt_ts,
@@ -140,7 +141,7 @@ CSS = _FONT_IMPORT + """
 
 /* ── base ── */
 html, body, .gradio-container { background: #faf8f4 !important; }
-.gradio-container { max-width: 1600px !important; width: 100% !important; margin: 0 auto !important; padding: 0 !important; }
+.gradio-container { max-width: 100% !important; width: 100% !important; margin: 0 auto !important; padding: 0 !important; }
 .main { padding: 0 !important; }
 
 /* ── topbar ── */
@@ -153,10 +154,11 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 }
 #topbar .title {
     font-family: 'Inter', sans-serif;
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: #9e9188;
-    letter-spacing: 0.01em;
+    font-size: 1.65rem;
+    font-weight: 600;
+    color: #2c2825;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
 }
 
 /* ── tab bar ── */
@@ -187,13 +189,267 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 
 /* ── layout ── */
 .tab-content > .flex { padding: 28px 36px !important; gap: 28px !important; }
+.upload-layout { width: 100% !important; gap: 12px !important; }
 
-/* ── controls panel ── */
+/* ── section title above cards ── */
+.section-heading,
+.section-heading p {
+    margin: 0 0 8px 0 !important;
+    color: #9e9188 !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+}
+.section-heading h3 {
+    margin: 0 !important;
+    font-size: inherit !important;
+    font-weight: inherit !important;
+    color: inherit !important;
+}
+
+/* ── upload: audio card (heading inside beige, like Model / Transcript) ── */
+.upload-audio-card {
+    background: #f4f0e8 !important;
+    border: 1px solid #e8e2d6 !important;
+    border-radius: 8px !important;
+    padding: 12px 14px 14px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    gap: 8px !important;
+}
+#upload-audio {
+    width: 100% !important;
+    min-width: 0 !important;
+}
+#upload-audio > .form,
+#upload-audio > .block {
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: 0 !important;
+}
+#upload-audio,
+#upload-audio > .form,
+#upload-audio > .block,
+#upload-audio .audio-container,
+#upload-audio [class*="waveform"],
+#upload-audio wave {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+}
+/* empty upload strip only — stay short until a file is loaded */
+#upload-audio:not(:has(wave)) > .form,
+#upload-audio:not(:has(wave)) > .block,
+#upload-audio:not(:has(wave)) .wrap {
+    min-height: 0 !important;
+    height: auto !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    margin: 0 !important;
+}
+#upload-audio .empty,
+#upload-audio .upload-container {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 0.3em !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    min-height: 0 !important;
+    height: 26px !important;
+    max-height: 26px !important;
+    padding: 0 8px !important;
+    overflow: hidden !important;
+    font-size: 0.75rem !important;
+    line-height: 1 !important;
+    border-radius: 6px !important;
+}
+#upload-audio .empty svg,
+#upload-audio .upload-container svg,
+#upload-audio .icon-wrap svg,
+#upload-audio .icon-wrap img {
+    width: 14px !important;
+    height: 14px !important;
+    max-width: 14px !important;
+    max-height: 14px !important;
+    flex-shrink: 0 !important;
+}
+#upload-audio .icon-wrap {
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+#upload-audio .empty > *,
+#upload-audio .upload-container > *,
+#upload-audio .icon-wrap,
+#upload-audio .or,
+#upload-audio .upload-text,
+#upload-audio .empty p,
+#upload-audio .empty span,
+#upload-audio .empty label,
+#upload-audio .empty div {
+    display: inline !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    max-width: none !important;
+    white-space: nowrap !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 1.4 !important;
+}
+#upload-audio wave,
+#upload-audio .wrapper,
+#upload-audio [class*="scroll"] {
+    overflow: hidden !important;
+    overflow-x: hidden !important;
+    width: 100% !important;
+}
+#upload-audio wave {
+    height: 72px !important;
+    min-height: 72px !important;
+}
+#upload-audio canvas {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 72px !important;
+}
+#upload-audio .audio-container,
+#upload-audio .waveform-container {
+    min-height: 72px !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+#upload-audio .controls,
+#upload-audio .control-wrapper,
+#upload-audio .timeline,
+#upload-audio [class*="time"],
+#upload-audio [class*="duration"] {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    flex-wrap: wrap !important;
+    gap: 6px 10px !important;
+    margin-top: 4px !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 24px !important;
+    visibility: visible !important;
+}
+
+/* ── upload: three matching settings tiles in a row ── */
+.upload-settings-row {
+    flex-wrap: nowrap !important;
+    gap: 12px !important;
+    align-items: stretch !important;
+    width: 100% !important;
+}
+.settings-tile {
+    background: #f4f0e8 !important;
+    border: 1px solid #e8e2d6 !important;
+    border-radius: 8px !important;
+    padding: 16px 20px !important;
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+}
+.settings-tile-heading,
+.settings-tile-heading p {
+    margin: 0 0 10px 0 !important;
+    color: #9e9188 !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+}
+.settings-tile-heading h3 {
+    margin: 0 !important;
+    font-size: inherit !important;
+    font-weight: inherit !important;
+    color: inherit !important;
+}
+/* normal labels inside tiles (global label rule is uppercase) */
+.settings-tile label,
+.settings-tile .label-wrap span {
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+}
+/* no extra inner box on diarization checkbox */
+#diarize-check > .block,
+#diarize-check > .form {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+.upload-transcribe-row {
+    margin-top: 2px !important;
+    width: 100% !important;
+}
+.upload-transcribe-row > .column,
+.upload-transcribe-row > .form,
+.upload-transcribe-row #transcribe-btn,
+.upload-transcribe-row .block {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex-grow: 1 !important;
+}
+@media (max-width: 960px) {
+    .upload-settings-row { flex-wrap: wrap !important; }
+    .settings-tile { flex: 1 1 calc(50% - 8px) !important; min-width: 220px !important; }
+}
+@media (max-width: 560px) {
+    .settings-tile { flex: 1 1 100% !important; }
+}
+
+/* ── transcript card (matches settings-tile / audio card) ── */
+.transcript-card {
+    background: #f4f0e8 !important;
+    border: 1px solid #e8e2d6 !important;
+    border-radius: 8px !important;
+    padding: 12px 14px 14px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    gap: 8px !important;
+}
+.transcript-card #stats,
+.transcript-card #live-stats {
+    border-top: 1px solid #e8e2d6 !important;
+    margin-top: 6px !important;
+    padding-top: 6px !important;
+}
+
+/* ── controls panel (live tab) ── */
 .controls-col {
     background: #f4f0e8 !important;
     border: 1px solid #e8e2d6 !important;
     border-radius: 8px !important;
     padding: 24px !important;
+}
+.live-audio-card {
+    width: 100% !important;
+}
+#live-mic-audio wave,
+#live-mic-audio .wrapper {
+    height: 52px !important;
+    min-height: 52px !important;
+    max-height: 52px !important;
+}
+#live-mic-audio,
+#live-mic-audio > .form,
+#live-mic-audio > .block,
+#live-mic-audio .audio-container,
+#live-mic-audio wave {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: hidden !important;
 }
 
 /* ── live transcript ── */
@@ -206,8 +462,8 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     background: #ffffff !important;
     border: 1px solid #e8e2d6 !important;
     border-radius: 8px !important;
-    min-height: 520px !important;
-    padding: 24px !important;
+    min-height: 380px !important;
+    padding: 16px !important;
     resize: none !important;
 }
 #live-transcript textarea::placeholder { color: #d4cec8 !important; }
@@ -236,8 +492,8 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     background: #ffffff;
     border: 1px solid #e8e2d6;
     border-radius: 8px;
-    min-height: 520px;
-    padding: 24px;
+    min-height: 380px;
+    padding: 16px;
     overflow-y: auto;
     color: #2c2825;
 }
@@ -292,7 +548,12 @@ button {
     font-weight: 500 !important;
     letter-spacing: 0.01em !important;
 }
-#transcribe-btn button { width: 100% !important; height: 40px !important; }
+#transcribe-btn,
+#transcribe-btn button {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 40px !important;
+}
 #clear-btn button, #save-live-btn button { width: 100% !important; height: 36px !important; }
 .stt-download-btn button {
     width: 100% !important;
@@ -319,9 +580,6 @@ button {
 textarea::-webkit-scrollbar { width: 4px; }
 textarea::-webkit-scrollbar-track { background: transparent; }
 textarea::-webkit-scrollbar-thumb { background: #e8e2d6; border-radius: 2px; }
-
-/* ── prevent column stacking before upload ── */
-.gradio-row { flex-wrap: nowrap !important; }
 
 /* ── backend missing (PyTorch / VC++ runtime) ── */
 .backend-setup-warning {
@@ -504,7 +762,17 @@ def preprocess_audio(input_path: str, start: float = 0.0, end: float = 0.0) -> s
 
 # ── Upload tab ────────────────────────────────────────────────────────────────
 
-def run_transcription(file, model_key, do_diarize, min_spk, max_spk, start_time, end_time, progress=gr.Progress()):
+def run_transcription(
+    file,
+    model_key,
+    do_diarize,
+    min_spk,
+    max_spk,
+    start_time,
+    end_time,
+    user_hint,
+    progress=gr.Progress(),
+):
     if file is None:
         raise gr.Error("Please upload an audio file first.")
 
@@ -541,6 +809,7 @@ def run_transcription(file, model_key, do_diarize, min_spk, max_spk, start_time,
                         cleaned,
                         model_key=model_key,
                         live=False,
+                        user_hint=user_hint,
                     )
                 except Exception as e:
                     _err[0] = e
@@ -731,8 +1000,8 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
             if (audio) { audio.currentTime = t; if (audio.paused) audio.play(); }
         }
 
-        // ── start/end region highlight ───────────────────────────────────
-        function highlightRegion(start, end) {
+        // ── start/end crop highlight on waveform ─────────────────────────
+        function highlightCrop(start, end) {
             const el = document.querySelector('#upload-audio');
             if (!el) return;
             const ws = el._wavesurfer || el.__wavesurfer;
@@ -766,21 +1035,113 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
             overlay.style.width = ((end - start) / dur * 100) + '%';
         }
 
-        // watch the start/end number inputs and update the highlight
-        function watchRegionInputs() {
+        // watch crop start/end inputs and update the highlight
+        function watchCropInputs() {
             const inputs = document.querySelectorAll(
-                '#start-end-region-inputs input[type=number]'
+                '#start-end-crop-inputs input[type=number]'
             );
-            if (inputs.length < 2) { setTimeout(watchRegionInputs, 500); return; }
+            if (inputs.length < 2) { setTimeout(watchCropInputs, 500); return; }
             const update = () => {
                 const s = parseFloat(inputs[0].value) || 0;
                 const e = parseFloat(inputs[1].value) || 0;
-                highlightRegion(s, e);
+                highlightCrop(s, e);
+                fitUploadWaveform();
             };
             inputs.forEach(inp => inp.addEventListener('input', update));
         }
-        document.addEventListener('DOMContentLoaded', watchRegionInputs);
-        setTimeout(watchRegionInputs, 1000);
+        document.addEventListener('DOMContentLoaded', watchCropInputs);
+        setTimeout(watchCropInputs, 1000);
+
+        function fitWaveform(containerId) {
+            const el = document.querySelector(containerId);
+            if (!el) return;
+            const ws = el._wavesurfer || el.__wavesurfer;
+            if (!ws) return;
+            const w = el.clientWidth;
+            if (w <= 0) return;
+            const dur = (typeof ws.getDuration === 'function' && ws.getDuration()) || 0;
+            const opts = { width: w };
+            if (dur > 0) {
+                opts.minPxPerSec = w / dur;
+            }
+            try {
+                if (ws.setOptions) ws.setOptions(opts);
+            } catch (e) {}
+            el.querySelectorAll('wave, .wrapper, [class*="scroll"]').forEach((node) => {
+                node.style.overflowX = 'hidden';
+                node.style.overflow = 'hidden';
+            });
+            if (ws.drawBuffer) ws.drawBuffer();
+            else if (typeof ws.render === 'function') ws.render();
+        }
+
+        function fitUploadWaveform() { fitWaveform('#upload-audio'); }
+        function fitLiveWaveform() { fitWaveform('#live-mic-audio'); }
+
+        window.addEventListener('resize', () => {
+            fitUploadWaveform();
+            fitLiveWaveform();
+        });
+
+        function watchWaveformContainers() {
+            ['#upload-audio', '#live-mic-audio'].forEach((sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return;
+                const obs = new MutationObserver(() => {
+                    fitWaveform(sel);
+                    [100, 300, 800, 1500, 3000].forEach((ms) => {
+                        setTimeout(() => fitWaveform(sel), ms);
+                    });
+                });
+                obs.observe(el, { childList: true, subtree: true, attributes: true });
+            });
+        }
+        document.addEventListener('DOMContentLoaded', watchWaveformContainers);
+        setTimeout(watchWaveformContainers, 500);
+
+        function compactUploadDropZone() {
+            const root = document.querySelector('#upload-audio');
+            if (!root || root.querySelector('wave')) return;
+            root.querySelectorAll('.form, .block, .wrap').forEach((el) => {
+                el.style.minHeight = '0';
+                el.style.paddingTop = '0';
+                el.style.paddingBottom = '0';
+            });
+            const zone = root.querySelector('.empty, [class*="upload"]');
+            if (!zone) return;
+            zone.style.height = '26px';
+            zone.style.maxHeight = '26px';
+            zone.style.minHeight = '0';
+            zone.style.padding = '0 8px';
+            zone.style.lineHeight = '1';
+            if (zone.dataset.sttFlat === '1') return;
+            const parts = zone.innerText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+            if (parts.length <= 1) { zone.dataset.sttFlat = '1'; return; }
+            zone.dataset.sttFlat = '1';
+            zone.style.display = 'flex';
+            zone.style.flexDirection = 'row';
+            zone.style.flexWrap = 'nowrap';
+            zone.style.alignItems = 'center';
+            zone.style.justifyContent = 'center';
+            zone.style.whiteSpace = 'nowrap';
+            zone.style.gap = '0.3em';
+            const icon = zone.querySelector('.icon-wrap, svg, img');
+            zone.textContent = '';
+            if (icon) zone.appendChild(icon);
+            const line = document.createElement('span');
+            line.style.whiteSpace = 'nowrap';
+            line.style.fontSize = '0.75rem';
+            line.style.lineHeight = '1';
+            line.textContent = parts.join(' ').replace(/\s+/g, ' ').trim();
+            zone.appendChild(line);
+        }
+        document.addEventListener('DOMContentLoaded', compactUploadDropZone);
+        [200, 600, 1200, 2500].forEach((ms) => setTimeout(compactUploadDropZone, ms));
+        const uploadObs = new MutationObserver(() => compactUploadDropZone());
+        document.addEventListener('DOMContentLoaded', () => {
+            const root = document.querySelector('#upload-audio');
+            if (root) uploadObs.observe(root, { childList: true, subtree: true });
+        });
         </script>
     """)
 
@@ -791,108 +1152,148 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 
         # ── Tab 1: Upload ─────────────────────────────────────────────────
         with gr.Tab("Upload"):
-            with gr.Row(equal_height=False):
-                with gr.Column(scale=1, min_width=320, elem_classes="controls-col"):
-                    # Put elem_id on a wrapper: Audio + label would otherwise emit <label for="id"> without a matching control id.
-                    gr.Markdown("### Audio / video file", elem_classes=["transcript-block-heading"])
+            with gr.Column(elem_classes=["upload-layout"]):
+                with gr.Column(elem_classes=["upload-audio-card"]):
+                    gr.Markdown("### Audio", elem_classes=["settings-tile-heading"])
                     with gr.Column(elem_id="upload-audio"):
                         file_input = gr.Audio(
                             type="filepath",
                             label=None,
                             show_label=False,
                         )
-                    model_picker = gr.Dropdown(
-                        choices=list(MODEL_MAP.keys()),
-                        value="large-v3-4bit",
-                        label="Model",
-                        info="4bit = fast  ·  large-v3 = max accuracy",
-                    )
-                    with gr.Row(elem_id="start-end-region-inputs"):
-                        start_time = gr.Number(label="Start (s)", value=0, minimum=0, scale=1)
-                        end_time   = gr.Number(label="End (s)",   value=0, minimum=0, scale=1,
-                                               info="0 = until end")
-                    diarize_check = gr.Checkbox(
-                        label="Speaker diarization",
-                        value=False,
-                    )
-                    with gr.Row():
-                        min_speakers = gr.Number(
-                            label="Min speakers",
-                            value=0,
-                            minimum=0,
-                            precision=0,
-                            scale=1,
-                            info="0 = auto",
+
+                with gr.Row(elem_classes=["upload-settings-row"]):
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Model", elem_classes=["settings-tile-heading"])
+                        model_picker = gr.Dropdown(
+                            choices=list(MODEL_MAP.keys()),
+                            value="large-v3-4bit",
+                            label=None,
+                            show_label=False,
+                            info="4bit = fast  ·  large-v3 = max accuracy",
                         )
-                        max_speakers = gr.Number(
-                            label="Max speakers",
-                            value=0,
-                            minimum=0,
-                            precision=0,
-                            scale=1,
-                            info="0 = auto",
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Crop", elem_classes=["settings-tile-heading"])
+                        with gr.Row(elem_id="start-end-crop-inputs"):
+                            start_time = gr.Number(
+                                label="Start (s)",
+                                value=0,
+                                minimum=0,
+                            )
+                            end_time = gr.Number(
+                                label="End (s)",
+                                value=0,
+                                minimum=0,
+                            )
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Speakers", elem_classes=["settings-tile-heading"])
+                        diarize_check = gr.Checkbox(
+                            label="Diarization",
+                            value=False,
+                            elem_id="diarize-check",
+                            container=False,
                         )
+                        with gr.Row(elem_id="speaker-range-inputs"):
+                            min_speakers = gr.Number(
+                                label="Min speakers",
+                                value=0,
+                                minimum=0,
+                                precision=0,
+                            )
+                            max_speakers = gr.Number(
+                                label="Max speakers",
+                                value=0,
+                                minimum=0,
+                                precision=0,
+                            )
+                with gr.Row(elem_classes=["upload-settings-row"]):
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Hints", elem_classes=["settings-tile-heading"])
+                        hint_input = gr.Textbox(
+                            lines=2,
+                            max_lines=4,
+                            label=None,
+                            show_label=False,
+                            placeholder=(
+                                "Optional: names, topic, jargon — e.g. board meeting, "
+                                "أحمد، سارة، مشروع النور"
+                            ),
+                            info=f"Always includes: {DEFAULT_INITIAL_PROMPT_FULL}",
+                        )
+                with gr.Row(elem_classes=["upload-transcribe-row"]):
                     run_btn = gr.Button(
                         "Transcribe",
                         variant="primary",
                         elem_id="transcribe-btn",
                     )
 
-                with gr.Column(scale=2, min_width=400):
-                    # gr.HTML with label= emits <label for="elem_id"> but no matching control id — bad for a11y audits.
-                    gr.Markdown("### Transcript", elem_classes=["transcript-block-heading"])
+                with gr.Column(elem_classes=["transcript-card"]):
+                    gr.Markdown("### Transcript", elem_classes=["settings-tile-heading"])
                     transcript_box = gr.HTML(
                         value='<div class="placeholder">$ _</div>',
                         elem_id="transcript-box",
                         label=None,
                         show_label=False,
                     )
-                    download_btn = gr.DownloadButton(
-                        label="Download transcript ⬇",
-                        visible=False,
-                        elem_classes=["stt-download-btn"],
-                    )
+                    with gr.Row():
+                        download_btn = gr.DownloadButton(
+                            label="Download transcript ⬇",
+                            visible=False,
+                            elem_classes=["stt-download-btn"],
+                            scale=1,
+                        )
                     stats_md = gr.Markdown(elem_id="stats")
 
         # ── Tab 2: Live ───────────────────────────────────────────────────
         with gr.Tab("Live"):
-            with gr.Row():
-                with gr.Column(scale=1, min_width=300, elem_classes="controls-col"):
-                    model_picker_live = gr.Dropdown(
-                        choices=list(MODEL_MAP.keys()),
-                        value="turbo-4bit",
-                        label="Model",
-                        info="turbo-4bit recommended for live mode",
-                    )
-                    chunk_slider = gr.Slider(
-                        minimum=3,
-                        maximum=15,
-                        value=6,
-                        step=1,
-                        label="Chunk size (sec)",
-                        info="Lower = faster response · Higher = better accuracy",
-                    )
-                    gr.Markdown("### Microphone", elem_classes=["transcript-block-heading"])
-                    mic_input = gr.Audio(
-                        sources=["microphone"],
-                        streaming=True,
-                        type="numpy",
-                        label=None,
-                        show_label=False,
-                    )
-                    save_live_btn = gr.Button(
-                        "Save transcript",
-                        variant="secondary",
-                        elem_id="save-live-btn",
-                    )
-                    clear_btn = gr.Button(
-                        "Clear",
-                        variant="secondary",
-                        elem_id="clear-btn",
-                    )
+            with gr.Column(elem_classes=["upload-layout"]):
+                with gr.Column(elem_classes=["live-audio-card upload-audio-card"]):
+                    gr.Markdown("### Microphone", elem_classes=["settings-tile-heading"])
+                    with gr.Column(elem_id="live-mic-audio"):
+                        mic_input = gr.Audio(
+                            sources=["microphone"],
+                            streaming=True,
+                            type="numpy",
+                            label=None,
+                            show_label=False,
+                        )
 
-                with gr.Column(scale=2):
-                    gr.Markdown("### Live transcript", elem_classes=["transcript-block-heading"])
+                with gr.Row(elem_classes=["upload-settings-row"]):
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Model", elem_classes=["settings-tile-heading"])
+                        model_picker_live = gr.Dropdown(
+                            choices=list(MODEL_MAP.keys()),
+                            value="turbo-4bit",
+                            label=None,
+                            show_label=False,
+                            info="turbo-4bit recommended for live mode",
+                        )
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Chunk size", elem_classes=["settings-tile-heading"])
+                        chunk_slider = gr.Slider(
+                            minimum=3,
+                            maximum=15,
+                            value=6,
+                            step=1,
+                            label=None,
+                            show_label=False,
+                            info="Lower = faster · Higher = more accurate",
+                        )
+                    with gr.Column(elem_classes=["settings-tile"], scale=1):
+                        gr.Markdown("### Actions", elem_classes=["settings-tile-heading"])
+                        save_live_btn = gr.Button(
+                            "Save transcript",
+                            variant="secondary",
+                            elem_id="save-live-btn",
+                        )
+                        clear_btn = gr.Button(
+                            "Clear",
+                            variant="secondary",
+                            elem_id="clear-btn",
+                        )
+
+                with gr.Column(elem_classes=["transcript-card"]):
+                    gr.Markdown("### Transcript", elem_classes=["settings-tile-heading"])
                     live_transcript = gr.Textbox(
                         lines=22,
                         elem_id="live-transcript",
@@ -901,11 +1302,13 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
                         label=None,
                         show_label=False,
                     )
-                    live_download_btn = gr.DownloadButton(
-                        label="Download transcript ⬇",
-                        visible=False,
-                        elem_classes=["stt-download-btn"],
-                    )
+                    with gr.Row():
+                        live_download_btn = gr.DownloadButton(
+                            label="Download transcript ⬇",
+                            visible=False,
+                            elem_classes=["stt-download-btn"],
+                            scale=1,
+                        )
                     live_stats = gr.Markdown(elem_id="live-stats")
 
     # ── State ─────────────────────────────────────────────────────────────
@@ -918,7 +1321,16 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 
     run_btn.click(
         fn=run_transcription,
-        inputs=[file_input, model_picker, diarize_check, min_speakers, max_speakers, start_time, end_time],
+        inputs=[
+            file_input,
+            model_picker,
+            diarize_check,
+            min_speakers,
+            max_speakers,
+            start_time,
+            end_time,
+            hint_input,
+        ],
         outputs=[transcript_box, download_btn, stats_md],
     )
 
@@ -950,7 +1362,7 @@ with gr.Blocks(title="Arabic Speech to Text", css=CSS) as demo:
 if __name__ == "__main__":
     inbrowser = os.environ.get("INBROWSER", "").strip().lower() in ("1", "true", "yes", "y")
     demo.launch(
-        server_name="127.0.0.1",
+        server_name="172.24.4.204",
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
         inbrowser=inbrowser,
         theme=THEME,
