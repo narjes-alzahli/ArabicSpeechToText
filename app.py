@@ -45,6 +45,7 @@ from transcribe import (
     transcribe_any,
 )
 from diarize import run_diarization, assign_speakers
+from text_fix import fix_segments, is_available as text_fix_available
 
 _ffmpeg_exe_cache: str | None = None
 
@@ -708,6 +709,39 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     flex: 1 1 auto;
     min-width: 10em;
 }
+/* ── stacked pipeline progress (upload transcribe) ── */
+#progress-steps { margin: 0 0 10px 0 !important; min-height: 0 !important; }
+#progress-steps .stt-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+}
+#progress-steps .stt-step-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.78rem;
+    color: #9e9188;
+}
+#progress-steps .stt-step-row.active { color: #2c2825; font-weight: 600; }
+#progress-steps .stt-step-row.done { color: #6b8f71; }
+#progress-steps .stt-step-label { flex: 0 0 auto; min-width: 7.5em; text-align: start; }
+#progress-steps .stt-step-track {
+    flex: 1;
+    height: 6px;
+    background: #e8e2d6;
+    border-radius: 3px;
+    overflow: hidden;
+}
+#progress-steps .stt-step-fill {
+    height: 100%;
+    background: #a08060;
+    border-radius: 3px;
+    transition: width 0.25s ease;
+}
+#progress-steps .stt-step-row.done .stt-step-fill { background: #6b8f71; }
+
 #transcript-box .ts {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.72em;
@@ -715,7 +749,7 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     cursor: pointer;
     margin-inline-end: 8px;
     user-select: none;
-    unicode-bidi: embed;
+    unicode-bidi: isolate;
     direction: ltr;
     display: inline-block;
 }
@@ -831,6 +865,62 @@ _EMPTY_TRANSCRIPT_HTML = (
     '<div class="transcript-body transcript-empty" dir="rtl" lang="ar"></div>'
 )
 
+_EMPTY_PROGRESS_HTML = '<div class="stt-steps"></div>'
+
+
+def _pipeline_steps(do_diarize: bool, do_text_fix: bool) -> list[str]:
+    steps = ["Transcribing"]
+    if do_diarize:
+        steps.append("Speakers")
+    if do_text_fix and text_fix_available():
+        steps.append("Fix typos")
+    return steps
+
+
+def _render_steps_progress(steps: list[str], active: int, within: float = 0.0) -> str:
+    if not steps:
+        return _EMPTY_PROGRESS_HTML
+    within = max(0.0, min(1.0, within))
+    rows = []
+    for i, label in enumerate(steps):
+        if i < active:
+            state, pct = "done", 100
+        elif i == active:
+            state, pct = "active", int(within * 100)
+        else:
+            state, pct = "pending", 0
+        rows.append(
+            f'<div class="stt-step-row {state}">'
+            f'<span class="stt-step-label">{label}</span>'
+            f'<div class="stt-step-track"><div class="stt-step-fill" '
+            f'style="width:{pct}%"></div></div>'
+            f"</div>"
+        )
+    return '<div class="stt-steps">' + "".join(rows) + "</div>"
+
+
+class _PipelineProgress:
+    def __init__(self, gr_progress, steps: list[str]):
+        self._p = gr_progress
+        self.steps = steps
+        self._n = max(len(steps), 1)
+
+    def tick(self, step: int, within: float = 0.0, desc: str | None = None) -> str:
+        within = max(0.0, min(1.0, within))
+        total = min(0.99, (step + within) / self._n)
+        label = desc or self.steps[step]
+        self._p(total, desc=label)
+        return _render_steps_progress(self.steps, step, within)
+
+
+def _pending_transcription_outputs(progress_html: str):
+    return (
+        _EMPTY_TRANSCRIPT_HTML,
+        gr.DownloadButton(visible=False, elem_classes=["stt-download-btn"]),
+        "",
+        progress_html,
+    )
+
 
 def fmt_duration_ar(seconds: float) -> str:
     """Human-readable Arabic duration: seconds only below 60, else minutes/hours."""
@@ -859,10 +949,11 @@ def reset_transcript_ui():
         _EMPTY_TRANSCRIPT_HTML,
         gr.DownloadButton(visible=False, elem_classes=["stt-download-btn"]),
         "",
+        _EMPTY_PROGRESS_HTML,
     )
 
 
-def segments_to_html(segments) -> str:
+def segments_to_html(segments, time_offset: float = 0.0) -> str:
     """Renders transcript as clickable word spans. Clicking a word seeks the audio player."""
     if not segments:
         return _EMPTY_TRANSCRIPT_HTML + "\n"
@@ -874,18 +965,19 @@ def segments_to_html(segments) -> str:
 
         speaker = seg.get("speaker", "")
         spk_html = f'<span class="spk">{speaker}</span>' if speaker else ""
-        seg_start = seg["start"]
-        seg_end   = seg["end"]
+        off = float(time_offset or 0)
+        seg_start = float(seg["start"]) + off
+        seg_end = float(seg["end"]) + off
         ts_html = (
             f'<span class="ts" onclick="seekAudio({seg_start:.3f})">'
-            f'[{fmt_ts(seg_start)} ← {fmt_ts(seg_end)}]</span>'
+            f'[{fmt_ts(seg_start)} → {fmt_ts(seg_end)}]</span>'
         )
 
         words = seg.get("words") or []
         if words:
             word_spans = []
             for w in words:
-                t = w.get("start", seg["start"])
+                t = float(w.get("start", seg["start"])) + off
                 word_text = w.get("word", "").strip()
                 if word_text:
                     word_spans.append(
@@ -893,7 +985,7 @@ def segments_to_html(segments) -> str:
                     )
             words_html = " ".join(word_spans)
         else:
-            t = seg["start"]
+            t = seg_start
             words_html = (
                 f'<span class="word" onclick="seekAudio({t:.3f})">'
                 f'{seg["text"].strip()}</span>'
@@ -911,7 +1003,8 @@ def segments_to_html(segments) -> str:
     )
 
 
-def segments_to_file(segments) -> str:
+def segments_to_file(segments, time_offset: float = 0.0) -> str:
+    off = float(time_offset or 0)
     lines = []
     for seg in segments:
         text = seg["text"].strip()
@@ -919,24 +1012,30 @@ def segments_to_file(segments) -> str:
             continue
         speaker = seg.get("speaker", "")
         prefix = f"{speaker}  " if speaker else ""
-        lines.append(f"{prefix}[{fmt_ts_ms(seg['start'])} → {fmt_ts_ms(seg['end'])}] {text}")
+        start = float(seg["start"]) + off
+        end = float(seg["end"]) + off
+        lines.append(f"{prefix}[{fmt_ts_ms(start)} → {fmt_ts_ms(end)}] {text}")
     return "\n".join(lines)
 
 
-def _save_diarization(turns: list, source_path: str) -> None:
+def _save_diarization(turns: list, source_path: str, time_offset: float = 0.0) -> None:
+    off = float(time_offset or 0)
     stem = Path(source_path).stem
     out = Path(__file__).parent / f"{stem}_diarization.txt"
-    lines = [f"[{fmt_ts_ms(s)} → {fmt_ts_ms(e)}]  {spk}" for s, e, spk in turns]
+    lines = [
+        f"[{fmt_ts_ms(s + off)} → {fmt_ts_ms(e + off)}]  {spk}" for s, e, spk in turns
+    ]
     out.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _save_transcript(segments: list, source_path: str) -> None:
+def _save_transcript(segments: list, source_path: str, time_offset: float = 0.0) -> None:
     stem = Path(source_path).stem
     out = Path(__file__).parent / f"{stem}_transcript.txt"
-    out.write_text(segments_to_file(segments), encoding="utf-8")
+    out.write_text(segments_to_file(segments, time_offset), encoding="utf-8")
 
 
-def _save_word_diarization(segments: list, source_path: str) -> None:
+def _save_word_diarization(segments: list, source_path: str, time_offset: float = 0.0) -> None:
+    off = float(time_offset or 0)
     stem = Path(source_path).stem
     out = Path(__file__).parent / f"{stem}_words.txt"
     lines = []
@@ -946,8 +1045,8 @@ def _save_word_diarization(segments: list, source_path: str) -> None:
             word = w.get("word", "").strip()
             if not word:
                 continue
-            start = fmt_ts_ms(w.get("start", seg["start"]))
-            end   = fmt_ts_ms(w.get("end",   seg["end"]))
+            start = fmt_ts_ms(float(w.get("start", seg["start"])) + off)
+            end = fmt_ts_ms(float(w.get("end", seg["end"])) + off)
             lines.append(f"{speaker}  [{start} → {end}]  {word}")
     out.write_text("\n".join(lines), encoding="utf-8")
 
@@ -1028,14 +1127,22 @@ def run_transcription(
     start_time,
     end_time,
     user_hint,
+    do_text_fix,
     progress=gr.Progress(),
 ):
     if file is None:
         raise gr.Error("Please upload an audio file first.")
 
-    progress(0.05, desc="Preprocessing audio")
+    crop_start = float(start_time or 0)
+    steps = _pipeline_steps(do_diarize, do_text_fix)
+    pipe = _PipelineProgress(progress, steps)
+    speakers_step = steps.index("Speakers") if do_diarize else -1
+    fix_step = steps.index("Fix typos") if "Fix typos" in steps else -1
+
+    yield _pending_transcription_outputs(pipe.tick(0, 0.0))
+
     evict_model_if_changed(model_key)
-    t0   = time.time()
+    t0 = time.time()
 
     raw_stem = Path(str(file)).stem.strip() or "audio"
     _bad = '<>:"/\\|?*'
@@ -1044,19 +1151,20 @@ def run_transcription(
 
     work_path = _copy_upload_for_processing(str(file))
     cleaned = None
+    segments: list[dict] = []
     try:
         try:
             cleaned = preprocess_audio(
                 work_path,
-                start=float(start_time or 0),
+                start=crop_start,
                 end=float(end_time or 0),
             )
         except RuntimeError as e:
             raise gr.Error(str(e)) from e
 
-        try:
-            progress(0.15, desc="Transcribing")
+        yield _pending_transcription_outputs(pipe.tick(0, 0.08))
 
+        try:
             _result: list = [None]
             _err: list = [None]
 
@@ -1074,11 +1182,14 @@ def run_transcription(
             t = threading.Thread(target=_whisper, daemon=True)
             t.start()
 
-            p = 0.15
+            within = 0.1
+            last_yield = time.time()
             while t.is_alive():
-                time.sleep(0.4)
-                p = min(p + 0.008, 0.68)
-                progress(p, desc="Transcribing")
+                time.sleep(0.35)
+                within = min(0.92, within + 0.04)
+                if time.time() - last_yield >= 0.45:
+                    yield _pending_transcription_outputs(pipe.tick(0, within))
+                    last_yield = time.time()
             t.join()
 
             if _err[0]:
@@ -1089,9 +1200,10 @@ def run_transcription(
             if not segments:
                 raise gr.Error("No speech detected in the file.")
 
+            yield _pending_transcription_outputs(pipe.tick(0, 1.0))
+
             if do_diarize:
-                progress(0.72, desc="Identifying speakers")
-                diarize_wav = None
+                yield _pending_transcription_outputs(pipe.tick(speakers_step, 0.0))
                 try:
                     try:
                         import mlx.core as mx  # type: ignore
@@ -1099,48 +1211,66 @@ def run_transcription(
                         mx.clear_cache()
                     except Exception:
                         pass
-                    diarize_wav = extract_audio_for_diarization(
-                        work_path,
-                        start=float(start_time or 0),
-                        end=float(end_time or 0),
-                    )
                     turns = run_diarization(
-                        diarize_wav,
+                        cleaned,
                         min_speakers=int(min_spk or 0),
                         max_speakers=int(max_spk or 0),
                     )
                     segments = assign_speakers(segments, turns)
-                    _save_diarization(turns, saves_ref)
-                    _save_word_diarization(segments, saves_ref)
+                    _save_diarization(turns, saves_ref, time_offset=crop_start)
+                    _save_word_diarization(segments, saves_ref, time_offset=crop_start)
                 except RuntimeError as e:
                     raise gr.Error(str(e))
-                finally:
-                    if diarize_wav:
-                        Path(diarize_wav).unlink(missing_ok=True)
+                yield _pending_transcription_outputs(pipe.tick(speakers_step, 1.0))
+
         finally:
             if cleaned:
                 Path(cleaned).unlink(missing_ok=True)
     finally:
         Path(work_path).unlink(missing_ok=True)
 
-    elapsed  = time.time() - t0
+    if do_text_fix:
+        if not text_fix_available():
+            gr.Warning(
+                "Local typo fix needs transformers installed. "
+                "Run once online: pip install -r requirements.txt && python prefetch_models.py"
+            )
+        else:
+            yield _pending_transcription_outputs(pipe.tick(fix_step, 0.0))
+
+            def _fix_progress(frac: float, desc: str):
+                pipe.tick(fix_step, frac, desc or "Fix typos")
+
+            try:
+                segments = fix_segments(
+                    segments,
+                    user_hint=user_hint or "",
+                    on_progress=_fix_progress,
+                )
+            except Exception as e:
+                gr.Warning(f"Typo fix skipped: {e}")
+
+            yield _pending_transcription_outputs(pipe.tick(fix_step, 1.0))
+
+    elapsed = time.time() - t0
     duration = segments[-1]["end"]
 
     out_fd, out_path_str = tempfile.mkstemp(suffix=".txt")
     os.close(out_fd)
     out_path = Path(out_path_str)
-    out_path.write_text(segments_to_file(segments), encoding="utf-8")
+    out_path.write_text(segments_to_file(segments, crop_start), encoding="utf-8")
 
-    _save_transcript(segments, saves_ref)
+    _save_transcript(segments, saves_ref, time_offset=crop_start)
 
     stats = (
         f"مدة التسجيل: {fmt_duration_ar(duration)} · "
         f"وقت المعالجة: {fmt_duration_ar(elapsed)}"
     )
 
+    done_html = _render_steps_progress(steps, len(steps), 0.0)
     progress(1.0, desc="Done")
-    return (
-        segments_to_html(segments),
+    yield (
+        segments_to_html(segments, time_offset=crop_start),
         gr.DownloadButton(
             value=str(out_path),
             visible=True,
@@ -1148,6 +1278,7 @@ def run_transcription(
             elem_classes=["stt-download-btn"],
         ),
         stats,
+        done_html,
     )
 
 
@@ -1454,12 +1585,14 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                                 value=0,
                                 minimum=0,
                                 precision=0,
+                                info="0 = auto",
                             )
                             max_speakers = gr.Number(
                                 label="Max speakers",
                                 value=0,
                                 minimum=0,
                                 precision=0,
+                                info="e.g. 2 for an interview",
                             )
                     with gr.Column(elem_classes=["settings-tile"], scale=2):
                         gr.Markdown("### Hints", elem_classes=["settings-tile-heading"])
@@ -1475,11 +1608,25 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                             info=f"Always includes: {DEFAULT_INITIAL_PROMPT_FULL}",
                         )
                 with gr.Row(elem_classes=["upload-transcribe-row"]):
+                    text_fix_check = gr.Checkbox(
+                        label="Fix typos",
+                        value=text_fix_available(),
+                        interactive=text_fix_available(),
+                        elem_id="text-fix-check",
+                    )
                     run_btn = gr.Button(
                         "Transcribe",
                         variant="primary",
                         elem_id="transcribe-btn",
                     )
+
+                progress_steps = gr.HTML(
+                    value=_EMPTY_PROGRESS_HTML,
+                    elem_id="progress-steps",
+                    show_label=False,
+                    container=False,
+                    padding=False,
+                )
 
                 with gr.Column(elem_classes=["transcript-card"]):
                     gr.Markdown("### Transcript", elem_classes=["settings-tile-heading"])
@@ -1585,7 +1732,7 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
 
     run_btn.click(
         fn=reset_transcript_ui,
-        outputs=[transcript_box, download_btn, stats_md],
+        outputs=[transcript_box, download_btn, stats_md, progress_steps],
     ).then(
         fn=run_transcription,
         inputs=[
@@ -1597,9 +1744,10 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
             start_time,
             end_time,
             hint_input,
+            text_fix_check,
         ],
-        outputs=[transcript_box, download_btn, stats_md],
-        show_progress="minimal",
+        outputs=[transcript_box, download_btn, stats_md, progress_steps],
+        show_progress="hidden",
     )
 
     mic_input.stream(

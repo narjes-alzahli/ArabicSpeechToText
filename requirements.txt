@@ -17,6 +17,10 @@ tqdm==4.67.3
 gradio==6.13.0
 gradio_client==2.5.0
 hf-gradio==0.4.1
-# speaker diarization (optional — only needed if "تمييز المتحدثين" is enabled)
+watchdog>=4.0.0
+# local typo-fix LLM (runs on CPU/GPU; download once via prefetch_models.py)
+transformers>=4.40.0
+accelerate>=0.30.0
+# speaker diarization (optional — only needed if diarization is enabled)
 pyannote.audio>=3.1.0
 torch>=2.1.0

@@ -9,6 +9,8 @@ Requirements:
   3. Provide your HuggingFace token via the UI field or HF_TOKEN env var
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
@@ -17,13 +19,23 @@ _pipeline = None
 _SPEAKER_LABELS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def speaker_label(pyannote_label: str) -> str:
     try:
         n = int(pyannote_label.split("_")[-1])
         letter = _SPEAKER_LABELS[n] if n < len(_SPEAKER_LABELS) else str(n + 1)
     except (ValueError, IndexError):
         letter = pyannote_label
-    return f"[متحدث {letter}]"
+    return f"[{letter} متحدث]"
 
 
 def load_pipeline(token: str = ""):
@@ -31,11 +43,9 @@ def load_pipeline(token: str = ""):
     if _pipeline is not None:
         return _pipeline
 
-    # pyannote's checkpoint loader calls inspect.stack() which accesses
-    # sys.modules['__main__']. Under `gradio app.py` hot-reload the module
-    # is compiled as '<string>' and '__main__' is absent — patch it in.
     import sys
     import types
+
     if "__main__" not in sys.modules:
         sys.modules["__main__"] = types.ModuleType("__main__")
 
@@ -51,27 +61,26 @@ def load_pipeline(token: str = ""):
             "huggingface.co/pyannote/speaker-diarization-3.1"
         )
 
-    _pipeline = Pipeline.from_pretrained(
+    pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
         token=token,
     )
 
-    # Lower segmentation onset/offset so shorter/quieter speaker turns are detected.
-    # Default is ~0.5 — 0.3 catches more speech at the cost of slightly more noise.
+    cluster_threshold = _env_float("DIARIZATION_CLUSTERING_THRESHOLD", 0.7)
     try:
-        _pipeline._segmentation.onset = 0.3
-        _pipeline._segmentation.offset = 0.3
+        pipeline.instantiate({"clustering": {"threshold": cluster_threshold}})
     except Exception:
         pass
 
     if torch.backends.mps.is_available():
-        _pipeline.to(torch.device("mps"))
+        pipeline.to(torch.device("mps"))
     else:
-        _pipeline.to(torch.device("cpu"))
+        pipeline.to(torch.device("cpu"))
 
-    _pipeline.segmentation_batch_size = 8
-    _pipeline.embedding_batch_size = 8
+    pipeline.segmentation_batch_size = 8
+    pipeline.embedding_batch_size = 8
 
+    _pipeline = pipeline
     return _pipeline
 
 
@@ -88,7 +97,6 @@ def _load_audio_for_pyannote(audio_path: str) -> dict:
         raise RuntimeError(f"Diarization audio not found: {path}")
 
     data, sr = sf.read(str(path), always_2d=True, dtype="float32")
-    # soundfile: (time, channels) → pyannote expects (channel, time)
     waveform = torch.from_numpy(data.T.copy())
     if waveform.ndim != 2:
         raise RuntimeError("Unexpected audio shape from soundfile.")
@@ -102,6 +110,30 @@ def _load_audio_for_pyannote(audio_path: str) -> dict:
     }
 
 
+def smooth_turns(
+    turns: list[tuple[float, float, str]],
+) -> list[tuple[float, float, str]]:
+    """Merge tiny gaps between same speaker; drop very short blips."""
+    if not turns:
+        return []
+
+    merge_gap = _env_float("DIARIZATION_MERGE_GAP", 0.35)
+    min_duration = _env_float("DIARIZATION_MIN_TURN", 0.5)
+
+    ordered = sorted(turns, key=lambda x: x[0])
+    merged: list[tuple[float, float, str]] = []
+    for start, end, spk in ordered:
+        if end <= start:
+            continue
+        if merged and spk == merged[-1][2] and start - merged[-1][1] <= merge_gap:
+            prev_s, _, prev_spk = merged[-1]
+            merged[-1] = (prev_s, max(merged[-1][1], end), prev_spk)
+        else:
+            merged.append((start, end, spk))
+
+    return [(s, e, spk) for s, e, spk in merged if e - s >= min_duration]
+
+
 def run_diarization(
     audio_path: str,
     token: str = "",
@@ -109,9 +141,9 @@ def run_diarization(
     min_speakers: int = 0,
     max_speakers: int = 0,
 ) -> list[tuple[float, float, str]]:
-    """Returns (start_sec, end_sec, speaker_label) tuples sorted by start time."""
+    """Returns (start_sec, end_sec, pyannote_speaker_id) sorted by start time."""
     pipeline = load_pipeline(token)
-    kwargs = {}
+    kwargs: dict = {}
     if num_speakers > 0:
         kwargs["num_speakers"] = num_speakers
     else:
@@ -119,119 +151,56 @@ def run_diarization(
             kwargs["min_speakers"] = min_speakers
         if max_speakers > 0:
             kwargs["max_speakers"] = max_speakers
+
     audio_input = _load_audio_for_pyannote(audio_path)
     result = pipeline(audio_input, **kwargs)
     annotation = (
-        result.speaker_diarization if hasattr(result, "speaker_diarization")
-        else result.diarization if hasattr(result, "diarization")
+        result.speaker_diarization
+        if hasattr(result, "speaker_diarization")
+        else result.diarization
+        if hasattr(result, "diarization")
         else result
     )
     turns = [
         (turn.start, turn.end, spk)
         for turn, _, spk in annotation.itertracks(yield_label=True)
     ]
-    return sorted(turns, key=lambda x: x[0])
+    return smooth_turns(turns)
 
 
-def _speaker_at(t: float, turns: list[tuple[float, float, str]]) -> str:
-    # collect all turns that contain t
-    matches = [(end - start, spk) for start, end, spk in turns if start <= t <= end]
-    if matches:
-        # prefer the shortest (most specific) matching turn — handles overlapping speech
-        return min(matches, key=lambda x: x[0])[1]
+def _overlap(start: float, end: float, ts: float, te: float) -> float:
+    return max(0.0, min(end, te) - max(start, ts))
+
+
+def _best_pyannote_speaker(start: float, end: float, turns: list[tuple[float, float, str]]) -> str:
     if not turns:
         return "SPEAKER_00"
-    return min(turns, key=lambda x: min(abs(x[0] - t), abs(x[1] - t)))[2]
+
+    scores: dict[str, float] = {}
+    for ts, te, spk in turns:
+        amount = _overlap(start, end, ts, te)
+        if amount > 0:
+            scores[spk] = scores.get(spk, 0.0) + amount
+
+    if scores:
+        return max(scores, key=scores.get)
+
+    mid = (start + end) / 2
+    return min(turns, key=lambda x: min(abs(x[0] - mid), abs(x[1] - mid)))[2]
 
 
 def assign_speakers(
     segments: list[dict],
     turns: list[tuple[float, float, str]],
 ) -> list[dict]:
+    """Tag each Whisper segment with the speaker who talked most during that time."""
     if not turns:
         return segments
 
-    # Flatten all Whisper words into one time-sorted list
-    all_words: list[dict] = []
+    out: list[dict] = []
     for seg in segments:
-        words = seg.get("words") or []
-        if words:
-            all_words.extend(words)
-        else:
-            all_words.append({"start": seg["start"], "end": seg["end"],
-                               "word": seg["text"].strip()})
-    all_words.sort(key=lambda w: w["start"])
-
-    # Snap each turn's start time to the nearest inter-word gap within 500 ms.
-    # Pyannote detects boundaries at fixed window steps (~250 ms), so the true
-    # speaker change — which always falls between words — can be off by that much.
-    # Snapping to the nearest silence gives a more accurate boundary than any
-    # fixed offset.
-    word_gaps = [
-        (all_words[i]["end"] + all_words[i + 1]["start"]) / 2
-        for i in range(len(all_words) - 1)
-        if all_words[i + 1]["start"] > all_words[i]["end"]
-    ]
-
-    def snap(t: float, window: float = 0.5) -> float:
-        nearby = [g for g in word_gaps if abs(g - t) <= window]
-        return min(nearby, key=lambda g: abs(g - t)) if nearby else t
-
-    turns = [(snap(ts), te, spk) for ts, te, spk in turns]
-
-    # Assign each word to its best (shortest) overlapping raw turn.
-    # Fall back to nearest turn for words that land in a gap.
-    labeled: list[tuple[str, dict]] = []
-    for w in all_words:
-        mid = (w["start"] + w["end"]) / 2
-        best_spk, best_dur = None, float("inf")
-        for ts, te, spk in turns:
-            if ts <= mid <= te:
-                dur = te - ts
-                if dur < best_dur:
-                    best_dur, best_spk = dur, spk
-        if best_spk is None:
-            best_spk = min(turns, key=lambda x: min(abs(x[0] - mid), abs(x[1] - mid)))[2]
-        labeled.append((speaker_label(best_spk), w))
-
-    # Group consecutive same-speaker words into one segment per run.
-    # Also split when a different-speaker turn falls in the gap between two
-    # consecutive same-speaker words — this handles both overlapping and
-    # zero-duration interjections that capture no word midpoints.
-    groups: list[tuple[str, list[dict]]] = []
-    for spk, w in labeled:
-        if not groups or groups[-1][0] != spk:
-            groups.append((spk, [w]))
-        else:
-            prev_w = groups[-1][1][-1]
-            gap_start, gap_end = prev_w["end"], w["start"]
-            # Only look for a speaker-change split if the gap between the two
-            # same-speaker words is at least 200 ms.  A shorter gap means the
-            # words are essentially adjacent and any overlapping turn from the
-            # other speaker is just simultaneous speech, not a real change.
-            split = False
-            if gap_end - gap_start >= 0.2:
-                split = any(
-                    speaker_label(ts_spk) != spk
-                    and min(te, gap_end) - max(ts, gap_start) > 0.05
-                    for ts, te, ts_spk in turns
-                )
-            if split:
-                groups.append((spk, [w]))
-            else:
-                groups[-1][1].append(w)
-
-    result: list[dict] = []
-    for spk, words in groups:
-        text = "".join(w.get("word", w.get("text", "")) for w in words).strip()
-        if not text:
-            continue
-        result.append({
-            "start":   words[0]["start"],
-            "end":     words[-1]["end"],
-            "text":    " " + text,
-            "words":   words,
-            "speaker": spk,
-        })
-
-    return result
+        item = dict(seg)
+        pyannote_spk = _best_pyannote_speaker(float(seg["start"]), float(seg["end"]), turns)
+        item["speaker"] = speaker_label(pyannote_spk)
+        out.append(item)
+    return out

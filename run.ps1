@@ -1,9 +1,13 @@
 # Start Arabic STT (kills anything on GRADIO_SERVER_PORT first).
 # Usage:
-#   .\run.ps1          — normal run
-#   .\run.ps1 -Reload  — auto-restart when app.py / transcribe.py change
+#   .\run.ps1              - watchdog reload (default)
+#   .\run.ps1 -NoReload    - single run, no file watcher
+#   .\run.ps1 -GradioReload - gradio in-process reload instead of dev_watch.py
 
-param([switch]$Reload)
+param(
+    [switch]$NoReload,
+    [switch]$GradioReload
+)
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -17,12 +21,15 @@ $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 $gradio = Join-Path $PSScriptRoot ".venv\Scripts\gradio.exe"
 
 if (-not (Test-Path $python)) {
-    Write-Error "Missing .venv — run: python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt"
+    Write-Error "Missing .venv - run: python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt"
 }
 
-if ($Reload) {
-    Write-Host "Reload mode: watching app.py and transcribe.py" -ForegroundColor Cyan
+if ($NoReload) {
+    & $python app.py
+} elseif ($GradioReload) {
+    Write-Host "Gradio reload mode (in-process watch)" -ForegroundColor Cyan
     & $gradio app.py
 } else {
-    & $python app.py
+    Write-Host "Watchdog mode (restarts on .py changes)" -ForegroundColor Cyan
+    & $python dev_watch.py
 }
