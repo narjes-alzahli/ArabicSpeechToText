@@ -720,9 +720,19 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 #start-end-crop-inputs .crop-hms-row .label-wrap span {
     font-size: 0.68rem !important;
 }
+@keyframes reveal-flash {
+    0%   { box-shadow: 0 0 0 2px rgba(160,128,96,0.55); border-radius: 6px; }
+    60%  { box-shadow: 0 0 0 2px rgba(160,128,96,0.55); border-radius: 6px; }
+    100% { box-shadow: 0 0 0 0   rgba(160,128,96,0);    border-radius: 6px; }
+}
+.reveal-flash {
+    animation: reveal-flash 1.4s ease-out forwards !important;
+}
 #start-end-crop-inputs {
     padding: 0 !important;
     gap: 6px !important;
+    border: none !important;
+    box-shadow: none !important;
 }
 #start-end-crop-inputs > .block,
 #start-end-crop-inputs > .form {
@@ -879,6 +889,12 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     border: none !important;
     padding: 0 !important;
     box-shadow: none !important;
+}
+/* make the transcript body itself scroll within the panel */
+#transcript-box .transcript-body {
+    overflow-y: auto !important;
+    max-height: calc(min(70vh, 720px) - 60px) !important;
+    padding-right: 4px !important;
 }
 #transcript-box textarea,
 #transcript-box pre,
@@ -1919,6 +1935,32 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
 
         function fitLiveWaveform() { fitWaveform('#live-mic-audio'); }
         window.addEventListener('resize', fitLiveWaveform);
+
+        // ── reveal-flash on section show ──────────────────────────────────
+        function watchReveal(id) {
+            function flash(el) {
+                el.classList.remove('reveal-flash');
+                void el.offsetWidth;
+                el.classList.add('reveal-flash');
+                el.addEventListener('animationend', function handler() {
+                    el.classList.remove('reveal-flash');
+                    el.removeEventListener('animationend', handler);
+                });
+            }
+            function attach() {
+                const el = document.getElementById(id);
+                if (!el) { setTimeout(attach, 400); return; }
+                let wasHidden = (el.style.display === 'none' || el.closest('[style*="display: none"]'));
+                new MutationObserver(function() {
+                    const hidden = (el.style.display === 'none');
+                    if (wasHidden && !hidden) flash(el);
+                    wasHidden = hidden;
+                }).observe(el, { attributes: true, attributeFilter: ['style'] });
+            }
+            attach();
+        }
+        watchReveal('start-end-crop-inputs');
+        watchReveal('speaker-range-inputs');
         </script>
     """)
 
