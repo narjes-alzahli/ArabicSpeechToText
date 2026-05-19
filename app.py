@@ -369,7 +369,8 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 #topbar {
     display: flex;
     align-items: center;
-    padding: 16px 36px;
+    justify-content: center;
+    padding: 16px 24px;
     border-bottom: 1px solid #e8e2d6;
     background: #faf8f4;
 }
@@ -533,23 +534,27 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     z-index: 3;
 }
 
-/* ── upload: single settings card, two columns ── */
+/* ── upload: settings grid (each option in its own beige tile) ── */
 .upload-settings-card {
-    background: #f4f0e8 !important;
-    border: 1px solid #e8e2d6 !important;
-    border-radius: 8px !important;
-    padding: 16px 20px !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
     width: 100% !important;
     margin-top: 12px !important;
+    gap: 12px !important;
 }
 .upload-settings-card > .block,
 .upload-settings-card > .form,
-.upload-settings-card .settings-section > .block,
-.upload-settings-card .settings-section > .form,
-.upload-settings-card .settings-tile-heading,
-.upload-settings-card .settings-section-heading,
+.upload-settings-card > .settings-tile-heading,
+.upload-settings-card .settings-tile .settings-tile-heading,
 .upload-settings-card .prose {
     border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+.upload-settings-card .settings-tile > .block,
+.upload-settings-card .settings-tile > .form {
     box-shadow: none !important;
     background: transparent !important;
 }
@@ -558,19 +563,41 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 }
 .upload-settings-cols {
     flex-wrap: wrap !important;
-    gap: 20px 28px !important;
+    gap: 8px 16px !important;
     align-items: flex-start !important;
     width: 100% !important;
 }
 .upload-settings-col {
     flex: 1 1 280px !important;
     min-width: 0 !important;
+    gap: 8px !important;
+    display: flex !important;
+    flex-direction: column !important;
 }
-.upload-settings-card .settings-section {
-    margin-bottom: 20px !important;
+.upload-settings-card .settings-tile {
+    width: 100% !important;
+    margin: 0 !important;
 }
-.upload-settings-card .settings-section:last-child {
-    margin-bottom: 0 !important;
+/* tighten Gradio's default inner block padding inside tiles */
+.upload-settings-card .settings-tile > .block,
+.upload-settings-card .settings-tile > .form {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+}
+.upload-settings-card .hints-tile {
+    flex: 1 1 auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+.upload-settings-card .hints-tile > .block,
+.upload-settings-card .hints-tile > div {
+    flex: 1 1 auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+.upload-settings-card .hints-tile textarea {
+    flex: 1 1 auto !important;
+    resize: none !important;
 }
 .settings-section-heading,
 .settings-section-heading p,
@@ -582,14 +609,71 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     letter-spacing: 0.04em !important;
     text-transform: uppercase !important;
 }
-.upload-settings-card .settings-section #speaker-range-inputs {
-    margin-top: 2px !important;
+#diarization-group,
+#crop-group {
+    background: #faf8f4 !important;
+    border: 1px solid #e8e2d6 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    padding: 10px 12px !important;
+    gap: 0 !important;
+}
+/* strip inner wrappers — checkbox and row sit flat inside the group */
+#diarization-group > .block,
+#diarization-group > .form,
+#diarization-group > .row,
+#diarization-group > div,
+#crop-group > .block,
+#crop-group > .form,
+#crop-group > div {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+/* space between checkbox and the speakers row */
+#diarization-group #speaker-range-inputs {
+    margin-top: 14px !important;
+}
+#diarization-group #speaker-range-inputs,
+#diarization-group #speaker-range-inputs > .block,
+#diarization-group #speaker-range-inputs > .form,
+#diarization-group #speaker-range-inputs .block,
+#diarization-group #speaker-range-inputs .form,
+#diarization-group #speaker-range-inputs .wrap {
+    gap: 8px !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+}
+/* white background on speaker dropdowns to match other inputs */
+#diarization-group #speaker-range-inputs .wrap > ul,
+#diarization-group #speaker-range-inputs input,
+#diarization-group #speaker-range-inputs .dropdown-arrow,
+#diarization-group #speaker-range-inputs .secondary-wrap {
+    background: #ffffff !important;
+}
+/* align dropdown input flush under its label */
+#diarization-group #speaker-range-inputs .block,
+#diarization-group #speaker-range-inputs .form {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+#diarization-group #speaker-range-inputs .label-wrap {
+    padding: 0 !important;
+    margin: 0 0 4px 0 !important;
+}
+#diarization-group #speaker-range-inputs .wrap {
+    margin: 0 !important;
+    padding: 0 !important;
 }
 .settings-tile {
     background: #f4f0e8 !important;
     border: 1px solid #e8e2d6 !important;
     border-radius: 8px !important;
-    padding: 16px 20px !important;
+    padding: 10px 14px !important;
     flex: 1 1 0 !important;
     min-width: 0 !important;
 }
@@ -601,7 +685,7 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 }
 .settings-tile-heading,
 .settings-tile-heading p {
-    margin: 0 0 10px 0 !important;
+    margin: 0 0 4px 0 !important;
     color: #9e9188 !important;
     font-size: 0.78rem !important;
     font-weight: 600 !important;
@@ -614,13 +698,19 @@ html, body, .gradio-container { background: #faf8f4 !important; }
     font-weight: inherit !important;
     color: inherit !important;
 }
-/* normal labels inside tiles (global label rule is uppercase) */
-.crop-hms-caption,
-.crop-hms-caption p {
-    font-size: 0.72rem !important;
-    color: #9e9188 !important;
-    margin: 0 0 4px !important;
-    line-height: 1.2 !important;
+/* From / To labels inside Crop tile — match Gradio label style */
+.crop-hms-label {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #9e9188;
+    letter-spacing: 0;
+    text-transform: none;
+    margin: 8px 0 3px;
+    line-height: 1.2;
+}
+#start-end-crop-inputs > div:first-child .crop-hms-label,
+#start-end-crop-inputs .crop-hms-label:first-of-type {
+    margin-top: 0;
 }
 .crop-hms-row {
     gap: 6px !important;
@@ -629,6 +719,17 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 #start-end-crop-inputs .crop-hms-row label,
 #start-end-crop-inputs .crop-hms-row .label-wrap span {
     font-size: 0.68rem !important;
+}
+#start-end-crop-inputs {
+    padding: 0 !important;
+    gap: 6px !important;
+}
+#start-end-crop-inputs > .block,
+#start-end-crop-inputs > .form {
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
 }
 #start-end-crop-inputs .block {
     flex: 1 1 0 !important;
@@ -647,16 +748,6 @@ html, body, .gradio-container { background: #faf8f4 !important; }
 .upload-settings-card .label-wrap span {
     text-transform: none !important;
     letter-spacing: 0 !important;
-}
-/* no extra inner box on settings checkboxes */
-#diarize-check > .block,
-#diarize-check > .form,
-#text-fix-check > .block,
-#text-fix-check > .form {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    padding: 0 !important;
 }
 .upload-transcribe-row {
     margin-top: 2px !important;
@@ -956,6 +1047,10 @@ label, .label-wrap span, fieldset legend {
     font-family: 'Inter', sans-serif !important;
     font-size: 0.73rem !important;
     color: #c4bab0 !important;
+}
+.hints-tile .info {
+    font-size: 0.875rem !important;
+    color: #b0a69c !important;
 }
 input, select {
     font-family: 'Inter', sans-serif !important;
@@ -1453,8 +1548,8 @@ def run_transcription(
                         pass
                     turns = run_diarization(
                         cleaned,
-                        min_speakers=int(min_spk or 0),
-                        max_speakers=int(max_spk or 0),
+                        min_speakers=0 if (not min_spk or min_spk == "auto") else int(min_spk),
+                        max_speakers=0 if (not max_spk or max_spk == "auto") else int(max_spk),
                     )
                     segments = assign_speakers(segments, turns)
                     _save_diarization(turns, saves_ref, time_offset=crop_start)
@@ -1871,80 +1966,94 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                         )
 
                 with gr.Column(elem_classes=["upload-settings-card"]):
-                    gr.Markdown("### Settings", elem_classes=["settings-tile-heading"])
                     with gr.Row(elem_classes=["upload-settings-cols"]):
                         with gr.Column(elem_classes=["upload-settings-col"]):
-                            with gr.Column(elem_classes=["settings-section"]):
-                                gr.Markdown("Model", elem_classes=["settings-section-heading"])
+                            with gr.Column(elem_classes=["settings-tile"]):
+                                gr.Markdown("### Model", elem_classes=["settings-tile-heading"])
                                 model_picker = gr.Dropdown(
-                                    choices=list(MODEL_MAP.keys()),
+                                    choices=[
+                                        ("Fast + Accurate [large-v3-4bit]", "large-v3-4bit"),
+                                        ("Turbo Fast [turbo-4bit]",         "turbo-4bit"),
+                                        ("Max Accuracy [large-v3]",         "large-v3"),
+                                        ("Turbo [turbo]",                   "turbo"),
+                                        ("Medium [medium]",                 "medium"),
+                                        ("Small [small]",                   "small"),
+                                    ],
                                     value="large-v3-4bit",
                                     label=None,
                                     show_label=False,
                                     filterable=False,
                                     allow_custom_value=False,
-                                    info="4bit = fast  ·  large-v3 = max accuracy",
                                 )
-                            with gr.Column(elem_classes=["settings-section"]):
-                                gr.Markdown("Output", elem_classes=["settings-section-heading"])
+                            with gr.Column(elem_classes=["settings-tile"]):
+                                gr.Markdown("### Cleaning", elem_classes=["settings-tile-heading"])
                                 text_fix_check = gr.Checkbox(
                                     label="Fix Typos",
                                     value=text_fix_available(),
                                     interactive=text_fix_available(),
                                     elem_id="text-fix-check",
-                                    container=False,
+                                    info=(
+                                        None
+                                        if text_fix_available()
+                                        else "Requires transformers (pip install -r requirements.txt)"
+                                    ),
                                 )
-                            with gr.Column(elem_classes=["settings-section"]):
-                                gr.Markdown("Hints", elem_classes=["settings-section-heading"])
+                            with gr.Column(elem_classes=["settings-tile", "hints-tile"]):
+                                gr.Markdown("### Hints", elem_classes=["settings-tile-heading"])
                                 hint_input = gr.Textbox(
-                                    lines=2,
-                                    max_lines=4,
+                                    lines=8,
+                                    max_lines=6,
                                     label=None,
                                     show_label=False,
                                     placeholder=(
-                                        "Optional: names, topic, jargon — e.g. board meeting, "
-                                        "أحمد، سارة، مشروع النور"
+                                        "Optional: names, topic, jargon"
                                     ),
                                     info=f"Always includes: {DEFAULT_INITIAL_PROMPT_FULL}",
                                 )
                         with gr.Column(elem_classes=["upload-settings-col"]):
-                            with gr.Column(elem_classes=["settings-section"]):
-                                gr.Markdown("Speakers", elem_classes=["settings-section-heading"])
-                                diarize_check = gr.Checkbox(
-                                    label="Diarization",
-                                    value=False,
-                                    elem_id="diarize-check",
-                                    container=False,
-                                )
-                                with gr.Row(elem_id="speaker-range-inputs"):
-                                    min_speakers = gr.Number(
-                                        label="Min speakers",
-                                        value=0,
-                                        minimum=0,
-                                        precision=0,
-                                        info="0 = auto",
+                            with gr.Column(elem_classes=["settings-tile"]):
+                                gr.Markdown("### Diarization", elem_classes=["settings-tile-heading"])
+                                with gr.Column(elem_id="diarization-group"):
+                                    diarize_check = gr.Checkbox(
+                                        label="Enable diarization",
+                                        value=False,
+                                        elem_id="diarize-check",
+                                        container=False,
                                     )
-                                    max_speakers = gr.Number(
-                                        label="Max speakers",
-                                        value=0,
-                                        minimum=0,
-                                        precision=0,
-                                        info="e.g. 2 for an interview",
+                                    with gr.Row(elem_id="speaker-range-inputs", visible=False) as speaker_range_row:
+                                        _spk_choices = ["auto", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+                                        min_speakers = gr.Dropdown(
+                                            label="Min Speakers",
+                                            choices=_spk_choices,
+                                            value="auto",
+                                            allow_custom_value=False,
+                                        )
+                                        max_speakers = gr.Dropdown(
+                                            label="Max Speakers",
+                                            choices=_spk_choices,
+                                            value="auto",
+                                            allow_custom_value=False,
+                                        )
+                            with gr.Column(elem_classes=["settings-tile"]):
+                                gr.Markdown("### Crop", elem_classes=["settings-tile-heading"])
+                                with gr.Column(elem_id="crop-group"):
+                                    crop_enable = gr.Checkbox(
+                                        label="Choose Segment",
+                                        value=False,
+                                        container=False,
                                     )
-                            with gr.Column(elem_classes=["settings-section"]):
-                                gr.Markdown("Crop", elem_classes=["settings-section-heading"])
-                                with gr.Column(elem_id="start-end-crop-inputs"):
-                                    gr.Markdown("From", elem_classes=["crop-hms-caption"])
+                                with gr.Column(elem_id="start-end-crop-inputs", visible=False) as crop_inputs_col:
+                                    gr.HTML('<p class="crop-hms-label">From</p>')
                                     with gr.Row(elem_classes=["crop-hms-row"]):
                                         start_h = gr.Number(
-                                            label="hour",
+                                            label="Hour",
                                             value=0,
                                             minimum=0,
                                             precision=0,
                                             scale=1,
                                         )
                                         start_m = gr.Number(
-                                            label="minute",
+                                            label="Minute",
                                             value=0,
                                             minimum=0,
                                             maximum=59,
@@ -1952,24 +2061,24 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                                             scale=1,
                                         )
                                         start_s = gr.Number(
-                                            label="second",
+                                            label="Second",
                                             value=0,
                                             minimum=0,
                                             maximum=59,
                                             precision=0,
                                             scale=1,
                                         )
-                                    gr.Markdown("To", elem_classes=["crop-hms-caption"])
+                                    gr.HTML('<p class="crop-hms-label">To</p>')
                                     with gr.Row(elem_classes=["crop-hms-row"]):
                                         end_h = gr.Number(
-                                            label="hour",
+                                            label="Hour",
                                             value=0,
                                             minimum=0,
                                             precision=0,
                                             scale=1,
                                         )
                                         end_m = gr.Number(
-                                            label="minute",
+                                            label="Minute",
                                             value=0,
                                             minimum=0,
                                             maximum=59,
@@ -1977,7 +2086,7 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                                             scale=1,
                                         )
                                         end_s = gr.Number(
-                                            label="second",
+                                            label="Second",
                                             value=0,
                                             minimum=0,
                                             maximum=59,
@@ -2042,13 +2151,19 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                     with gr.Column(elem_classes=["settings-tile"], scale=1):
                         gr.Markdown("### Model", elem_classes=["settings-tile-heading"])
                         model_picker_live = gr.Dropdown(
-                            choices=list(MODEL_MAP.keys()),
+                            choices=[
+                                ("Turbo Fast [turbo-4bit]",         "turbo-4bit"),
+                                ("Fast + Accurate [large-v3-4bit]", "large-v3-4bit"),
+                                ("Max Accuracy [large-v3]",         "large-v3"),
+                                ("Turbo [turbo]",                   "turbo"),
+                                ("Medium [medium]",                 "medium"),
+                                ("Small [small]",                   "small"),
+                            ],
                             value="turbo-4bit",
                             label=None,
                             show_label=False,
                             filterable=False,
                             allow_custom_value=False,
-                            info="turbo-4bit recommended for live mode",
                         )
                     with gr.Column(elem_classes=["settings-tile"], scale=1):
                         gr.Markdown("### Chunk size", elem_classes=["settings-tile-heading"])
@@ -2106,6 +2221,18 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
         fn=handle_audio_upload,
         inputs=[file_input],
         outputs=[playback_html],
+    )
+
+    crop_enable.change(
+        fn=lambda checked: gr.update(visible=checked),
+        inputs=[crop_enable],
+        outputs=[crop_inputs_col],
+    )
+
+    diarize_check.change(
+        fn=lambda checked: gr.update(visible=checked),
+        inputs=[diarize_check],
+        outputs=[speaker_range_row],
     )
 
     run_btn.click(

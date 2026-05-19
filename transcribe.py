@@ -405,7 +405,6 @@ def transcribe_any(
     if backend == "faster":
         model = _fw_model_for_key(model_key)
 
-        # Map common params; ignore thresholds that are mlx-specific.
         segments_iter, info = model.transcribe(
             audio_path,
             language=kwargs.get("language", "ar"),
@@ -413,6 +412,11 @@ def transcribe_any(
             condition_on_previous_text=bool(kwargs.get("condition_on_previous_text", True)),
             initial_prompt=kwargs.get("initial_prompt", None),
             temperature=kwargs.get("temperature", 0.0),
+            no_speech_threshold=kwargs.get("no_speech_threshold", 0.6),
+            log_prob_threshold=kwargs.get("logprob_threshold", -3.0),
+            compression_ratio_threshold=kwargs.get("compression_ratio_threshold", 3.0),
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
         )
 
         segments_out = []
