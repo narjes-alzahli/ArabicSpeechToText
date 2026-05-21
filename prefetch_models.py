@@ -5,7 +5,7 @@ After this, set HF_HUB_OFFLINE=1 in .env for air-gapped use.
 
   python prefetch_models.py
   python prefetch_models.py --diarize
-  python prefetch_models.py --whisper large-v3,turbo-4bit
+  python prefetch_models.py --whisper large-v3,medium,small
 """
 
 from __future__ import annotations
@@ -59,8 +59,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Download models for offline Arabic STT")
     p.add_argument(
         "--whisper",
-        default="large-v3-4bit",
-        help="Comma-separated UI model keys (default: large-v3-4bit)",
+        default="large-v3",
+        help="Comma-separated model keys: small, medium, large-v3 (default: large-v3)",
     )
     p.add_argument("--diarize", action="store_true", help="Also download pyannote diarization")
     p.add_argument("--no-text-fix", action="store_true", help="Skip local typo-fix LLM")

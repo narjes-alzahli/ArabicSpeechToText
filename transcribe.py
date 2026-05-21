@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Arabic STT - post-processing transcription using mlx-whisper (Apple Silicon optimized).
+Arabic STT - transcription via faster-whisper (Windows/Linux) or mlx-whisper (macOS only).
 
 Usage:
     python transcribe.py meeting.mp4
@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-_BACKEND = os.environ.get("WHISPER_BACKEND", "").strip().lower()  # "mlx" | "faster" | "openai" | ""
+_BACKEND = os.environ.get("WHISPER_BACKEND", "").strip().lower()  # "faster" | "openai" | "mlx" (macOS only)
 
 
 def _have_mlx() -> bool:
@@ -88,16 +88,16 @@ def describe_backend_failures() -> str:
 def get_backend() -> str:
     """
     Select backend:
-    - Windows: faster-whisper (if installed), else openai-whisper
-    - macOS/Apple Silicon: mlx-whisper (if installed), else faster-whisper
-    Override with env: WHISPER_BACKEND=mlx|faster|openai
+    - Windows/Linux: faster-whisper (if installed), else openai-whisper
+    - macOS only: mlx-whisper (if installed), else faster-whisper
+    Override with env: WHISPER_BACKEND=faster|openai|mlx (mlx ignored off macOS)
     """
-    if _BACKEND == "mlx" and _have_mlx():
-        return "mlx"
     if _BACKEND == "faster" and _have_faster_whisper():
         return "faster"
     if _BACKEND == "openai" and _have_openai_whisper():
         return "openai"
+    if _BACKEND == "mlx" and sys.platform == "darwin" and _have_mlx():
+        return "mlx"
     if _BACKEND in ("mlx", "faster", "openai"):
         pass  # forced backend missing — fall through to auto
     if sys.platform == "win32":
@@ -106,7 +106,7 @@ def get_backend() -> str:
         if _have_openai_whisper():
             return "openai"
         return "none"
-    if _have_mlx():
+    if sys.platform == "darwin" and _have_mlx():
         return "mlx"
     if _have_faster_whisper():
         return "faster"
@@ -115,24 +115,20 @@ def get_backend() -> str:
     return "none"
 
 
-MODEL_MAP_MLX = {
-    "large-v3-4bit": "mlx-community/whisper-large-v3-mlx-4bit",  # recommended: fast + accurate
-    "turbo-4bit": "mlx-community/whisper-large-v3-turbo-q4",  # recommended for live
-    "large-v3": "mlx-community/whisper-large-v3-mlx",  # max accuracy, slow
-    "turbo": "mlx-community/whisper-large-v3-turbo",
-    "medium": "mlx-community/whisper-medium-mlx",
-    "small": "mlx-community/whisper-small-mlx",
+# UI / CLI model keys (faster-whisper + openai-whisper; int8 on Windows).
+WHISPER_MODEL_KEYS = ("small", "medium", "large-v3")
+
+MODEL_MAP_FASTER = {
+    "small": "small",
+    "medium": "medium",
+    "large-v3": "large-v3",
 }
 
-# faster-whisper model identifiers. "4bit" here maps to lower-precision compute,
-# not an actual 4-bit weight format.
-MODEL_MAP_FASTER = {
-    "large-v3-4bit": "large-v3",
-    "turbo-4bit": "large-v3-turbo",
-    "large-v3": "large-v3",
-    "turbo": "large-v3-turbo",
-    "medium": "medium",
-    "small": "small",
+# macOS only (mlx-whisper); same three sizes, no MLX 4bit/turbo bundles.
+MODEL_MAP_MLX = {
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
 }
 
 
@@ -150,10 +146,15 @@ BEAM_SIZE_BY_MODEL_KEY = {
     "small": 1,
     "medium": 3,
     "large-v3": 2,
-    "large-v3-4bit": 2,
-    "turbo": 2,
-    "turbo-4bit": 2,
 }
+
+
+def resolve_model_key(model_key: str) -> str:
+    if model_key not in WHISPER_MODEL_KEYS:
+        raise ValueError(
+            f"Unknown model {model_key!r}. Choose one of: {', '.join(WHISPER_MODEL_KEYS)}"
+        )
+    return model_key
 
 # Default text priming Whisper (initial_prompt) — UI hints are appended to these.
 DEFAULT_INITIAL_PROMPT_FULL = "هذا تسجيل باللغة العربية"
@@ -260,9 +261,8 @@ def transcribe(audio_path: Path, model_key: str, fmt: str) -> str:
     backend = get_backend()
     if backend == "none":
         raise RuntimeError(
-            "No Whisper backend installed. Install mlx-whisper (macOS Apple Silicon), "
-            "faster-whisper (Windows/Linux; needs a working CTranslate2), or openai-whisper: "
-            "pip install openai-whisper"
+            "No Whisper backend installed. On Windows/Linux install faster-whisper "
+            "(or openai-whisper as fallback). On macOS, mlx-whisper or faster-whisper."
         )
 
     repo = model_map[model_key]
@@ -319,13 +319,14 @@ def _fw_compute_type_for_key(model_key: str) -> str:
     # Match Z_ArabicSTT on Windows: int8 CPU.
     if sys.platform == "win32":
         return "int8"
-    if model_key.endswith("-4bit"):
-        return "int8"
     return "float16"
 
 
 def _fw_device() -> str:
-    return os.environ.get("FASTER_WHISPER_DEVICE", "cpu")
+    override = os.environ.get("FASTER_WHISPER_DEVICE", "").strip()
+    if override:
+        return override
+    return "cpu"
 
 
 def _fw_model_for_key(model_key: str):
@@ -407,6 +408,7 @@ def transcribe_any(
     isolated_clip: if True (non-live), tune decoding for a short stand-alone clip (e.g. one diarization turn).
     diarize_turn: if True, match Z_ArabicSTT per-turn faster-whisper settings (no initial_prompt, 2.4/-1.0, beam).
     """
+    model_key = resolve_model_key(model_key)
     backend = get_backend()
     kwargs = dict(WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS)
     if diarize_turn and not live:
@@ -440,6 +442,8 @@ def transcribe_any(
         )
         raise RuntimeError("".join(parts))
     if backend == "mlx":
+        if sys.platform != "darwin":
+            raise RuntimeError("mlx-whisper is only available on macOS.")
         import mlx_whisper
 
         repo = MODEL_MAP_MLX[model_key]
@@ -540,7 +544,7 @@ def main():
     parser.add_argument("audio", help="Path to audio or video file")
     parser.add_argument(
         "--model",
-        choices=list(MODEL_MAP.keys()),
+        choices=list(WHISPER_MODEL_KEYS),
         default=DEFAULT_MODEL,
         help=f"Whisper model to use (default: {DEFAULT_MODEL})",
     )

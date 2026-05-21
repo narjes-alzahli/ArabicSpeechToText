@@ -39,6 +39,7 @@ gr.set_static_paths([str(_ui_upload_dir.resolve())])
 from transcribe import (
     DEFAULT_INITIAL_PROMPT_FULL,
     MODEL_MAP,
+    WHISPER_MODEL_KEYS,
     describe_backend_failures,
     fmt_ts,
     fmt_ts_ms,
@@ -48,6 +49,16 @@ from transcribe import (
 )
 from diarize import run_diarization, speaker_label
 from text_fix import fix_segments, is_available as text_fix_available
+
+_WHISPER_MODEL_LABELS = {
+    "small": "Fast (small)",
+    "medium": "Balanced (medium)",
+    "large-v3": "Accurate (large-v3)",
+}
+WHISPER_MODEL_CHOICES: list[tuple[str, str]] = [
+    (_WHISPER_MODEL_LABELS[k], k) for k in WHISPER_MODEL_KEYS
+]
+DEFAULT_WHISPER_MODEL = "large-v3"
 
 _ffmpeg_exe_cache: str | None = None
 
@@ -1133,12 +1144,13 @@ def evict_model_if_changed(new_model_key: str):
     global _loaded_model_repo
     new_repo = MODEL_MAP[new_model_key]
     if _loaded_model_repo is not None and _loaded_model_repo != new_repo:
-        try:
-            import mlx.core as mx  # type: ignore
+        if sys.platform == "darwin":
+            try:
+                import mlx.core as mx  # type: ignore
 
-            mx.clear_cache()
-        except Exception:
-            pass
+                mx.clear_cache()
+            except Exception:
+                pass
         reset_whisper_caches()
     _loaded_model_repo = new_repo
 
@@ -1576,12 +1588,13 @@ def run_transcription(
 
                 def _dia_job():
                     try:
-                        try:
-                            import mlx.core as mx  # type: ignore
+                        if sys.platform == "darwin":
+                            try:
+                                import mlx.core as mx  # type: ignore
 
-                            mx.clear_cache()
-                        except Exception:
-                            pass
+                                mx.clear_cache()
+                            except Exception:
+                                pass
                         turns_box[0] = run_diarization(
                             dia_audio,
                             min_speakers=dia_min,
@@ -2159,15 +2172,8 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                             with gr.Column(elem_classes=["settings-tile"]):
                                 gr.Markdown("### Model", elem_classes=["settings-tile-heading"])
                                 model_picker = gr.Dropdown(
-                                    choices=[
-                                        ("Fast + Accurate [large-v3-4bit]", "large-v3-4bit"),
-                                        ("Turbo Fast [turbo-4bit]",         "turbo-4bit"),
-                                        ("Max Accuracy [large-v3]",         "large-v3"),
-                                        ("Turbo [turbo]",                   "turbo"),
-                                        ("Medium [medium]",                 "medium"),
-                                        ("Small [small]",                   "small"),
-                                    ],
-                                    value="large-v3",
+                                    choices=WHISPER_MODEL_CHOICES,
+                                    value=DEFAULT_WHISPER_MODEL,
                                     label=None,
                                     show_label=False,
                                     filterable=False,
@@ -2339,15 +2345,8 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                     with gr.Column(elem_classes=["settings-tile"], scale=1):
                         gr.Markdown("### Model", elem_classes=["settings-tile-heading"])
                         model_picker_live = gr.Dropdown(
-                            choices=[
-                                ("Turbo Fast [turbo-4bit]",         "turbo-4bit"),
-                                ("Fast + Accurate [large-v3-4bit]", "large-v3-4bit"),
-                                ("Max Accuracy [large-v3]",         "large-v3"),
-                                ("Turbo [turbo]",                   "turbo"),
-                                ("Medium [medium]",                 "medium"),
-                                ("Small [small]",                   "small"),
-                            ],
-                            value="turbo-4bit",
+                            choices=WHISPER_MODEL_CHOICES,
+                            value=DEFAULT_WHISPER_MODEL,
                             label=None,
                             show_label=False,
                             filterable=False,
