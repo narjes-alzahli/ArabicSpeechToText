@@ -46,7 +46,7 @@ from transcribe import (
     reset_whisper_caches,
     transcribe_any,
 )
-from diarize import run_diarization, assign_speakers
+from diarize import run_diarization, speaker_label
 from text_fix import fix_segments, is_available as text_fix_available
 
 _ffmpeg_exe_cache: str | None = None
@@ -1154,9 +1154,10 @@ _EMPTY_PROGRESS_HTML = '<div class="stt-steps"></div>'
 
 
 def _pipeline_steps(do_diarize: bool, do_text_fix: bool) -> list[str]:
-    steps = ["Transcribing"]
+    steps: list[str] = []
     if do_diarize:
         steps.append("Speakers")
+    steps.append("Transcribing")
     if do_text_fix and text_fix_available():
         steps.append("Cleaning up")
     return steps
@@ -1462,6 +1463,49 @@ def preprocess_audio(input_path: str, start: float = 0.0, end: float = 0.0) -> s
     return tmp.name
 
 
+def _extract_mp3_clip(input_path: str, start: float, end: float) -> str:
+    """Extract [start, end] seconds to a temp MP3 (16 kHz mono), matching Z_ArabicSTT extract_clip."""
+    if end <= start:
+        raise ValueError("clip end must be greater than start")
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    ff = _ffmpeg_executable()
+    cmd = [
+        ff,
+        "-y",
+        "-ss",
+        str(start),
+        "-to",
+        str(end),
+        "-i",
+        input_path,
+        "-f",
+        "mp3",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        tmp.name,
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        Path(tmp.name).unlink(missing_ok=True)
+        err = (result.stderr or b"").decode(errors="replace")
+        raise RuntimeError(f"ffmpeg clip extract failed:\n{err}")
+    return tmp.name
+
+
+def _diarization_speaker_bounds(min_spk, max_spk) -> tuple[int, int]:
+    """Default min=2, max=5 (meeting_transcriber). 'auto' leaves bounds to pyannote."""
+    min_v = 2 if not min_spk or min_spk == "auto" else int(min_spk)
+    max_v = 5 if not max_spk or max_spk == "auto" else int(max_spk)
+    if min_spk == "auto":
+        min_v = 0
+    if max_spk == "auto":
+        max_v = 0
+    return min_v, max_v
+
+
 # ── Upload tab ────────────────────────────────────────────────────────────────
 
 def run_transcription(
@@ -1487,7 +1531,8 @@ def run_transcription(
     crop_end = hms_to_seconds(end_h, end_m, end_s)
     steps = _pipeline_steps(do_diarize, do_text_fix)
     pipe = _PipelineProgress(progress, steps)
-    speakers_step = steps.index("Speakers") if do_diarize else -1
+    transcribe_step_idx = steps.index("Transcribing")
+    speakers_step_idx = steps.index("Speakers") if do_diarize else -1
     fix_step = steps.index("Cleaning up") if "Cleaning up" in steps else -1
 
     yield _pending_transcription_outputs(pipe.tick(0, 0.0))
@@ -1502,81 +1547,182 @@ def run_transcription(
 
     work_path = _copy_upload_for_processing(str(file))
     cleaned = None
+    dia_audio = None
     segments: list[dict] = []
     try:
         try:
-            cleaned = preprocess_audio(
-                work_path,
-                start=crop_start,
-                end=crop_end,
-            )
+            if do_diarize:
+                dia_audio = extract_audio_for_diarization(
+                    work_path,
+                    start=crop_start,
+                    end=crop_end,
+                )
+            else:
+                cleaned = preprocess_audio(
+                    work_path,
+                    start=crop_start,
+                    end=crop_end,
+                )
         except RuntimeError as e:
             raise gr.Error(str(e)) from e
 
         yield _pending_transcription_outputs(pipe.tick(0, 0.08))
 
         try:
-            _result: list = [None]
-            _err: list = [None]
-
-            def _whisper():
-                try:
-                    _result[0] = transcribe_any(
-                        cleaned,
-                        model_key=model_key,
-                        live=False,
-                        user_hint=user_hint,
-                    )
-                except Exception as e:
-                    _err[0] = e
-
-            t = threading.Thread(target=_whisper, daemon=True)
-            t.start()
-
-            within = 0.1
-            last_yield = time.time()
-            while t.is_alive():
-                time.sleep(0.35)
-                within = min(0.92, within + 0.04)
-                if time.time() - last_yield >= 0.45:
-                    yield _pending_transcription_outputs(pipe.tick(0, within))
-                    last_yield = time.time()
-            t.join()
-
-            if _err[0]:
-                raise gr.Error(str(_err[0])) from _err[0]
-            result = _result[0]
-
-            segments = result.get("segments", [])
-            if not segments:
-                raise gr.Error("No speech detected in the file.")
-
-            yield _pending_transcription_outputs(pipe.tick(0, 1.0))
-
             if do_diarize:
-                yield _pending_transcription_outputs(pipe.tick(speakers_step, 0.0))
-                try:
-                    try:
-                        import mlx.core as mx  # type: ignore
+                dia_min, dia_max = _diarization_speaker_bounds(min_spk, max_spk)
+                turns_box: list = [None]
+                dia_err: list = [None]
 
-                        mx.clear_cache()
-                    except Exception:
-                        pass
-                    turns = run_diarization(
-                        cleaned,
-                        min_speakers=0 if (not min_spk or min_spk == "auto") else int(min_spk),
-                        max_speakers=0 if (not max_spk or max_spk == "auto") else int(max_spk),
+                def _dia_job():
+                    try:
+                        try:
+                            import mlx.core as mx  # type: ignore
+
+                            mx.clear_cache()
+                        except Exception:
+                            pass
+                        turns_box[0] = run_diarization(
+                            dia_audio,
+                            min_speakers=dia_min,
+                            max_speakers=dia_max,
+                        )
+                    except Exception as e:
+                        dia_err[0] = e
+
+                t_d = threading.Thread(target=_dia_job, daemon=True)
+                t_d.start()
+                dia_within = 0.05
+                last_yield = time.time()
+                while t_d.is_alive():
+                    time.sleep(0.35)
+                    dia_within = min(0.92, dia_within + 0.03)
+                    if time.time() - last_yield >= 0.45:
+                        yield _pending_transcription_outputs(
+                            pipe.tick(
+                                speakers_step_idx,
+                                dia_within,
+                                desc="Speakers (pyannote)",
+                            )
+                        )
+                        last_yield = time.time()
+                t_d.join()
+                if dia_err[0]:
+                    raise gr.Error(str(dia_err[0])) from dia_err[0]
+                turns = turns_box[0] or []
+                if not turns:
+                    raise gr.Error(
+                        "No speech detected by speaker diarization — try adjusting min/max speakers "
+                        "or the audio crop."
                     )
-                    segments = assign_speakers(segments, turns)
-                    _save_diarization(turns, saves_ref, time_offset=crop_start)
-                    _save_word_diarization(segments, saves_ref, time_offset=crop_start)
-                except RuntimeError as e:
-                    raise gr.Error(str(e))
-                yield _pending_transcription_outputs(pipe.tick(speakers_step, 1.0))
+                _save_diarization(turns, saves_ref, time_offset=crop_start)
+                yield _pending_transcription_outputs(
+                    pipe.tick(speakers_step_idx, 1.0, desc="Speakers")
+                )
+
+                n_turns = len(turns)
+                segments = []
+                for i, (t_start, t_end, spk) in enumerate(turns):
+                    yield _pending_transcription_outputs(
+                        pipe.tick(
+                            transcribe_step_idx,
+                            i / max(n_turns, 1),
+                            desc=f"Transcribing turn {i + 1} of {n_turns}",
+                        )
+                    )
+                    clip_path = _extract_mp3_clip(dia_audio, t_start, t_end)
+                    try:
+                        res = transcribe_any(
+                            clip_path,
+                            model_key=model_key,
+                            live=False,
+                            user_hint=None,
+                            diarize_turn=True,
+                        )
+                    finally:
+                        Path(clip_path).unlink(missing_ok=True)
+
+                    spk_label = speaker_label(spk)
+                    for s in res.get("segments", []):
+                        txt = (s.get("text") or "").strip()
+                        if not txt:
+                            continue
+                        abs_start = t_start + float(s["start"])
+                        abs_end = t_start + float(s["end"])
+                        if segments and txt == segments[-1]["text"].strip():
+                            segments[-1]["end"] = abs_end
+                            continue
+                        seg_dict: dict = {
+                            "start": abs_start,
+                            "end": abs_end,
+                            "text": s["text"],
+                            "speaker": spk_label,
+                        }
+                        words = s.get("words")
+                        if words:
+                            seg_dict["words"] = [
+                                {
+                                    "start": t_start + float(w.get("start", 0)),
+                                    "end": t_start + float(w.get("end", 0)),
+                                    "word": w.get("word", ""),
+                                }
+                                for w in words
+                            ]
+                        segments.append(seg_dict)
+
+                if not segments:
+                    raise gr.Error("No speech detected in the file.")
+
+                yield _pending_transcription_outputs(
+                    pipe.tick(transcribe_step_idx, 1.0, desc="Transcribing")
+                )
+                _save_word_diarization(segments, saves_ref, time_offset=crop_start)
+
+            else:
+                _result: list = [None]
+                _err: list = [None]
+
+                def _whisper():
+                    try:
+                        _result[0] = transcribe_any(
+                            cleaned,
+                            model_key=model_key,
+                            live=False,
+                            user_hint=user_hint,
+                        )
+                    except Exception as e:
+                        _err[0] = e
+
+                t = threading.Thread(target=_whisper, daemon=True)
+                t.start()
+
+                within = 0.1
+                last_yield = time.time()
+                while t.is_alive():
+                    time.sleep(0.35)
+                    within = min(0.92, within + 0.04)
+                    if time.time() - last_yield >= 0.45:
+                        yield _pending_transcription_outputs(
+                            pipe.tick(transcribe_step_idx, within)
+                        )
+                        last_yield = time.time()
+                t.join()
+
+                if _err[0]:
+                    raise gr.Error(str(_err[0])) from _err[0]
+                result = _result[0]
+
+                segments = result.get("segments", [])
+                if not segments:
+                    raise gr.Error("No speech detected in the file.")
+
+                yield _pending_transcription_outputs(pipe.tick(transcribe_step_idx, 1.0))
 
         finally:
             if cleaned:
                 Path(cleaned).unlink(missing_ok=True)
+            if dia_audio:
+                Path(dia_audio).unlink(missing_ok=True)
     finally:
         Path(work_path).unlink(missing_ok=True)
 
@@ -2021,7 +2167,7 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                                         ("Medium [medium]",                 "medium"),
                                         ("Small [small]",                   "small"),
                                     ],
-                                    value="large-v3-4bit",
+                                    value="large-v3",
                                     label=None,
                                     show_label=False,
                                     filterable=False,
@@ -2067,13 +2213,13 @@ with gr.Blocks(title="Arabic Speech to Text") as demo:
                                         min_speakers = gr.Dropdown(
                                             label="Min Speakers",
                                             choices=_spk_choices,
-                                            value="auto",
+                                            value="2",
                                             allow_custom_value=False,
                                         )
                                         max_speakers = gr.Dropdown(
                                             label="Max Speakers",
                                             choices=_spk_choices,
-                                            value="auto",
+                                            value="5",
                                             allow_custom_value=False,
                                         )
                             with gr.Column(elem_classes=["settings-tile"]):

@@ -117,7 +117,8 @@ def smooth_turns(
     if not turns:
         return []
 
-    merge_gap = _env_float("DIARIZATION_MERGE_GAP", 0.35)
+    # Wider default match “diarize-first then Whisper per turn” (merge adjacent same-speaker gaps).
+    merge_gap = _env_float("DIARIZATION_MERGE_GAP", 1.5)
     min_duration = _env_float("DIARIZATION_MIN_TURN", 0.5)
 
     ordered = sorted(turns, key=lambda x: x[0])

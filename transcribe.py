@@ -88,8 +88,8 @@ def describe_backend_failures() -> str:
 def get_backend() -> str:
     """
     Select backend:
-    - macOS/Apple Silicon: mlx-whisper (if installed)
-    - otherwise: faster-whisper (if installed), else openai-whisper (CPU/GPU via PyTorch)
+    - Windows: faster-whisper (if installed), else openai-whisper
+    - macOS/Apple Silicon: mlx-whisper (if installed), else faster-whisper
     Override with env: WHISPER_BACKEND=mlx|faster|openai
     """
     if _BACKEND == "mlx" and _have_mlx():
@@ -100,6 +100,12 @@ def get_backend() -> str:
         return "openai"
     if _BACKEND in ("mlx", "faster", "openai"):
         pass  # forced backend missing — fall through to auto
+    if sys.platform == "win32":
+        if _have_faster_whisper():
+            return "faster"
+        if _have_openai_whisper():
+            return "openai"
+        return "none"
     if _have_mlx():
         return "mlx"
     if _have_faster_whisper():
@@ -138,6 +144,16 @@ def get_model_map() -> dict:
 MODEL_MAP = get_model_map()
 
 DEFAULT_MODEL = "large-v3"
+
+# Beam sizes aligned with meeting_transcriber (Z_ArabicSTT).
+BEAM_SIZE_BY_MODEL_KEY = {
+    "small": 1,
+    "medium": 3,
+    "large-v3": 2,
+    "large-v3-4bit": 2,
+    "turbo": 2,
+    "turbo-4bit": 2,
+}
 
 # Default text priming Whisper (initial_prompt) — UI hints are appended to these.
 DEFAULT_INITIAL_PROMPT_FULL = "هذا تسجيل باللغة العربية"
@@ -292,11 +308,20 @@ _fw_model = None
 _fw_model_key = None
 
 
+def beam_size_for_model_key(model_key: str) -> int:
+    return BEAM_SIZE_BY_MODEL_KEY.get(model_key, 2)
+
+
 def _fw_compute_type_for_key(model_key: str) -> str:
-    # good default on CPU Windows; if user has CUDA they can override via env.
+    override = os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "").strip()
+    if override:
+        return override
+    # Match Z_ArabicSTT on Windows: int8 CPU.
+    if sys.platform == "win32":
+        return "int8"
     if model_key.endswith("-4bit"):
-        return os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "int8")
-    return os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "float16")
+        return "int8"
+    return "float16"
 
 
 def _fw_device() -> str:
@@ -319,6 +344,8 @@ def _fw_model_for_key(model_key: str):
         model_id,
         device=device,
         compute_type=compute_type,
+        num_workers=4,
+        cpu_threads=4,
     )
     _fw_model_key = (model_id, device, compute_type)
     return _fw_model
@@ -368,16 +395,36 @@ def transcribe_any(
     model_key: str,
     live: bool,
     user_hint: str | None = None,
+    *,
+    isolated_clip: bool = False,
+    diarize_turn: bool = False,
 ) -> dict:
     """
     Returns a dict compatible with mlx_whisper.transcribe output:
     { "segments": [ {start, end, text, words?}, ... ] }
 
     user_hint: optional extra text appended to the default Arabic initial_prompt.
+    isolated_clip: if True (non-live), tune decoding for a short stand-alone clip (e.g. one diarization turn).
+    diarize_turn: if True, match Z_ArabicSTT per-turn faster-whisper settings (no initial_prompt, 2.4/-1.0, beam).
     """
     backend = get_backend()
     kwargs = dict(WHISPER_LIVE_KWARGS if live else WHISPER_FULL_KWARGS)
-    kwargs["initial_prompt"] = build_initial_prompt(user_hint, live=live)
+    if diarize_turn and not live:
+        kwargs.update(
+            language="ar",
+            word_timestamps=False,
+            condition_on_previous_text=False,
+            temperature=0.0,
+            no_speech_threshold=0.6,
+            logprob_threshold=-1.0,
+            compression_ratio_threshold=2.4,
+            initial_prompt=None,
+        )
+    else:
+        kwargs["initial_prompt"] = build_initial_prompt(user_hint, live=live)
+        if isolated_clip and not live:
+            kwargs["condition_on_previous_text"] = False
+            kwargs["temperature"] = 0.0
     if backend == "none":
         te = _torch_import_error()
         fe = _faster_whisper_import_error()
@@ -405,19 +452,26 @@ def transcribe_any(
     if backend == "faster":
         model = _fw_model_for_key(model_key)
 
-        segments_iter, info = model.transcribe(
-            audio_path,
+        vad_parameters = {"min_silence_duration_ms": 500}
+        if isolated_clip or diarize_turn:
+            vad_parameters["speech_pad_ms"] = 200
+
+        fw_kwargs = dict(
             language=kwargs.get("language", "ar"),
             word_timestamps=bool(kwargs.get("word_timestamps", False)),
             condition_on_previous_text=bool(kwargs.get("condition_on_previous_text", True)),
-            initial_prompt=kwargs.get("initial_prompt", None),
+            initial_prompt=kwargs.get("initial_prompt"),
             temperature=kwargs.get("temperature", 0.0),
             no_speech_threshold=kwargs.get("no_speech_threshold", 0.6),
             log_prob_threshold=kwargs.get("logprob_threshold", -3.0),
             compression_ratio_threshold=kwargs.get("compression_ratio_threshold", 3.0),
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
+            vad_parameters=vad_parameters,
         )
+        if diarize_turn and not live:
+            fw_kwargs["beam_size"] = beam_size_for_model_key(model_key)
+
+        segments_iter, info = model.transcribe(audio_path, **fw_kwargs)
 
         segments_out = []
         for seg in segments_iter:
